@@ -37,6 +37,8 @@ You can help support development by reporting [issues](https://github.com/TecnaG
   stop signs and speed-limit signs (mph or km/h by country), traffic lights and sidewalks where OpenStreetMap maps them;
   railway lines as 3D track (ballast, sleepers and rails, rail bridges on piers, the ground cut and filled for the
   line) and tram tracks (street track where trams run on the road).
+- Mapped street lamps illuminate nearby roads at night, following the game's day/night state. Up to 24
+  non-shadowing lights within 90 m of the player follow their lamp models through streaming and origin shifts.
 - Gas stations with pumps, canopies and forecourts in the region's style, where the stock refuel prompt fills the
   tank.
 - Bridges drawn as their real type (beam, truss, arch, cable-stayed, suspension) with real heights and spans, piers

@@ -28,6 +28,8 @@ MatrixF = function() return { setFromEuler = function() end, setPosition = funct
 local files = {}
 readFile = function(p) return files[p] end
 jsonDecode = function(s) return assert(load('return ' .. s))() end
+core_environment = { getLightState = function() return { nightLightsActive = true } end }
+local lights = require('beamngEarth/streetlights')
 local trees = require('beamngEarth/trees')
 trees.EVERY_N = 1               -- (every update works here; the batching is tested below)
 local function count() local n = 0; for _ in pairs(items) do n = n + 1 end; return n end
@@ -245,4 +247,53 @@ trees.onTile({ anchorId = 9, key = '1_0', path = '/t/rocks', n = 4 }, 9)
 trees.update(9, { x = 384, y = 50 })
 T.check(count() == 6, 're-enabled groups return from current-anchor rows while ghost trees remain')
 trees.clear()
+-- Forest lamps and their actual PointLights share visibility, anchor transforms and lifetime.
+trees.clear()
+local lamps = {
+  { 0, 128, 128, 0, 90, 1, 9, 0 },
+  { 1, 144, 128, 0, 90, 1, 1.1, 0 },
+}
+local function updateLamps(anchor, y)
+  local player = { x = 128, y = y, z = 0 }
+  trees.update(anchor, player)
+  lights.update(anchor, player, 0.25)
+end
+trees.onRows(42, '0_0', lamps, { 'streetlight', 'polelamp' })
+updateLamps(42, 128)
+T.check(count() == 2 and #S.liveOf('PointLight') == 2, 'visible Forest lamps illuminate at night')
+local beforeShift = {}
+for _, light in ipairs(S.liveOf('PointLight')) do beforeShift[light.id] = light.pos.y end
+trees.transform(shift, geo)
+for _, light in ipairs(S.liveOf('PointLight')) do
+  T.near(light.pos.y, beforeShift[light.id] - 20, 1e-6, 'the live emitter follows its rebased Forest lamp')
+end
+trees.setGroupEnabled('streetlight', false)
+updateLamps(43, 108)
+T.check(count() == 1 and #S.liveOf('PointLight') == 1, 'hiding a ghost lamp removes its illumination')
+trees.setGroupEnabled('streetlight', true)
+updateLamps(43, 108)
+T.check(count() == 1 and #S.liveOf('PointLight') == 1, 'reenabling a group does not recreate stale ghost lamps')
+local currentLamps = {
+  { 0, 128, 108, 0, 90, 1, 9, 0 },
+  { 1, 144, 108, 0, 90, 1, 1.1, 0 },
+}
+trees.onRows(43, '0_0', currentLamps, { 'streetlight', 'polelamp' })
+trees.onRows(43, '0_-1', {}, { 'streetlight', 'polelamp' })
+for _ = 1, 3 do updateLamps(43, 108) end
+T.check(count() == 2 and #S.liveOf('PointLight') == 2, 'current-anchor lamps replace the remaining ghosts without duplicate illumination')
+trees.setGroupEnabled('streetlight', false)
+updateLamps(43, 108)
+T.check(count() == 1 and #S.liveOf('PointLight') == 1, 'hiding a current lamp removes its illumination')
+trees.setGroupEnabled('streetlight', true)
+updateLamps(43, 108)
+T.check(count() == 2 and #S.liveOf('PointLight') == 2, 'reenabling current lamps restores their illumination')
+trees.onDrop({ anchorId = 43, key = '0_0' })
+updateLamps(43, 108)
+T.check(count() == 0 and #S.liveOf('PointLight') == 0 and lights.status().items == 0, 'dropping a Forest tile leaves no lamps or illumination')
+trees.onRows(44, '0_0', currentLamps, { 'streetlight', 'polelamp' })
+updateLamps(44, 108)
+T.check(count() == 2 and #S.liveOf('PointLight') == 2, 'fresh lamps illuminate after a tile drop')
+trees.clear()
+T.check(count() == 0 and #S.liveOf('PointLight') == 0 and lights.status().items == 0, 'clearing Forest items also clears their illumination and source records')
+
 T.done('test_trees')

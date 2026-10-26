@@ -7,6 +7,7 @@
 -- hundred per frame (~19 us each, 2026-10-13 probe).
 local M = {}
 local vienna = require('beamngEarth/vienna_convention_speed_signs')
+local streetlights = require('beamngEarth/streetlights')
 
 M.PER_FRAME = 250       -- items made or removed per frame at most
 M.ROWS_PER_FRAME = 12000 -- rows of changing tiles looked at per frame at most (Lua time: 30000 averaged 2.5 ms)
@@ -339,6 +340,24 @@ local function removeItem(fd, it, shape)
   M.removed = M.removed + 1
   if shape then pop[shape] = math.max((pop[shape] or 1) - 1, 0) end
 end
+local function addStreetlight(t, tileKey, i, group, row, scale)
+  if group ~= 'streetlight' and group ~= 'polelamp' then return end
+  if streetlights.add(tileKey, tileKey .. ':' .. i, group, row, scale, t.ft, t.fq) then
+    t.lights = t.lights or {}
+    t.lights[i] = true
+  end
+end
+
+local function removeStreetlight(t, tileKey, i)
+  if not (t.lights and t.lights[i]) then return end
+  streetlights.remove(tileKey .. ':' .. i)
+  t.lights[i] = nil
+  if next(t.lights) == nil then t.lights = nil end
+end
+
+local function dropStreetlights(t, tileKey)
+  if t.lights then streetlights.dropTile(tileKey) end
+end
 
 -- This frame's shapes: may an item of this shape change now? (see SHAPE_ITEMS_PER_FRAME)
 local touched, touchedItems = {}, 0
@@ -373,6 +392,7 @@ function M.onRows(anchorId, tileKey, rows, groups)
     made = old and old.made or {}, solid = old and old.solid or {}, near = old and old.near,
     shapes = old and old.rows == rows and old.shapes or {}, scales = old and old.rows == rows and old.scales or {},
     madeShape = old and old.madeShape or {}, shown = old and old.shown or 0, forestId = old and old.forestId or nil,
+    lights = old and old.lights or nil,
     variant = M.tileVariant(key), cx = (tonumber(tx) or 0) * 256 + 128, cy = (tonumber(ty) or 0) * 256 + 128, drop = false }
   tiles[key] = t
 end
@@ -380,13 +400,14 @@ end
 -- The tile "anchorId:key" goes (roads.lua's furniture).
 function M.dropKey(key)
   local t = tiles[key]
-  if t then t.drop = true end
+  if t then t.drop = true; dropStreetlights(t, key) end
 end
 
 -- A 'veg_drop' message: the tile's items go.
 function M.onDrop(msg)
-  local t = tiles[msg.anchorId .. ':' .. tostring(msg.key)]
-  if t then t.drop = true end
+  local key = msg.anchorId .. ':' .. tostring(msg.key)
+  local t = tiles[key]
+  if t then t.drop = true; dropStreetlights(t, key) end
 end
 
 local function threshold(d)
@@ -460,7 +481,7 @@ M.GHOST_FAR_WAIT_S = 2
 function M.transform(xf, geodesy)
   local bx, by, bz, bw = xf:beamngQuat()
   local any = false
-  for _, t in pairs(tiles) do
+  for key, t in pairs(tiles) do
     if not t.drop then
       local q = t.fq or { 0, 0, 0, 1 }
       local x, y, z, w = geodesy.quatMul(q[1], q[2], q[3], q[4], bx, by, bz, bw)
@@ -468,6 +489,7 @@ function M.transform(xf, geodesy)
       local o = t.ft or { 0, 0, 0 }
       local ox, oy, oz = xf:apply(o[1], o[2], o[3])
       t.ft = { ox, oy, oz }
+      if t.lights then streetlights.setTileTransform(key, t.ft, t.fq) end
       local f = t.forestId and scenetree.findObjectById(t.forestId)
       if f then f:setPosRot(ox, oy, oz, x, y, z, w) end
       t.cx, t.cy = xf:apply(t.cx, t.cy, 0)
@@ -550,6 +572,7 @@ function M.update(anchorId, player, view)
         local sh = t.madeShape[i]
         if not sh or allow(sh) then
           if t.solid[i] then nearRemoved = true end
+          removeStreetlight(t, key, i)
           if fd then removeItem(fd, it, sh) end
           t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
           budget = budget - 1
@@ -571,6 +594,7 @@ function M.update(anchorId, player, view)
           local sh = t.madeShape[i]
           if not sh or allow(sh) then
             if t.solid[i] then nearRemoved = true end
+            removeStreetlight(t, key, i)
             if fd then removeItem(fd, it, sh) end
             t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
             budget = budget - 1
@@ -634,11 +658,13 @@ function M.update(anchorId, player, view)
           if allow(sh) then
             if t.made[i] then
               if t.solid[i] then nearRemoved = true end
+              removeStreetlight(t, o[1], i)
               removeItem(data(), t.made[i], t.madeShape[i])
               budget = budget - 1
             end -- solid <-> not
             t.made[i] = makeItem(data(), row, sh, sc, solid, g, t.variant)
             t.solid[i] = (t.made[i] and solid) or nil      -- true or nil
+            if t.made[i] then addStreetlight(t, o[1], i, g, row, sc) end
             t.madeShape[i] = t.made[i] and sh or nil
             if solid then nearMade = true end
             budget = budget - 1
@@ -647,6 +673,7 @@ function M.update(anchorId, player, view)
           if budget <= 0 then t.pending = true; finish(); return end
           if allow(t.madeShape[i] or '') then
             if t.solid[i] then nearRemoved = true end
+            removeStreetlight(t, o[1], i)
             removeItem(data(), t.made[i], t.madeShape[i])
             t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
             budget = budget - 1
@@ -663,6 +690,7 @@ end
 
 -- Disconnect, a new server session, mod unload: every item removed.
 function M.clear()
+  streetlights.clear()
   for _, t in pairs(tiles) do
     local f = t.forestId and scenetree.findObjectById(t.forestId)
     local fd = f and f:getData()
@@ -674,6 +702,7 @@ end
 
 -- Level end: the level deletes its objects itself.
 function M.reset()
+  streetlights.reset()
   tiles, types, ready, pool, forestCount, pop = {}, {}, false, {}, 0, {}
 end
 
