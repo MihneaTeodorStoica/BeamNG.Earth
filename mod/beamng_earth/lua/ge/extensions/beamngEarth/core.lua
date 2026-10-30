@@ -1813,6 +1813,7 @@ local function drawUi(dt)
   if st.inOurLevel then
     hudapps.hookCityZone(minimapName)
     hudapps.hookMinimapNorth(minimapNorth)
+    levelinfo.hookSpawnPois()
   end
   if updateInfo and st.inOurLevel and st.active and not credits.hiddenByUi()
       and (st.clock or 0) > (st.loadingUntil or 0) then
@@ -2256,6 +2257,7 @@ local function onClientEndMission()
   notePlayerPos(true)
   hudapps.unhookCityZone()
   hudapps.unhookMinimapNorth()
+  levelinfo.unhookSpawnPois()
   postfx.restore()
   require('beamngEarth/enginepref').restore()
   pcall(terrainpatch.clear)
@@ -2312,6 +2314,7 @@ M.onFilesChanged = onFilesChanged
 local function onExtensionUnloaded()
   hudapps.unhookCityZone()
   hudapps.unhookMinimapNorth()
+  levelinfo.unhookSpawnPois()
   groundcover.enginePatch(false)
   net.close()
   farfield.clear()
