@@ -903,6 +903,11 @@ def _travel_vec(left, right, tdir):
     return np.stack([u[:, 1], -u[:, 0]], 1) * float(tdir or 0)
 
 
+MEDIAN_ALONG = 0.6      # another deck's nearest edge point counts as across a median only this far along (x the gap) ...
+MEDIAN_ALONG_M = 1.2    # ... or m (its edge points' spacing)
+MEDIAN_INSIDE_M = 0.3   # m: and no further inside this deck's edge
+
+
 def _median_gaps(rb, context=()):
     """Per deck ribbon (left, right, opposite left, opposite right): the gap (m) from each edge point to the nearest
     edge of another deck within MEDIAN_JOIN_M at about its height (PARAPET_COVER_DZ), else 0: a median between two
@@ -925,9 +930,12 @@ def _median_gaps(rb, context=()):
         own = c.get("fid", ("own", n))
         mine = _travel_vec(left, right, c.get("tdir", 0))
         sides, opps = [], []
-        for E in (np.c_[left, z], np.c_[right, z]):
+        for E, out_ in ((np.c_[left, z], left - right), (np.c_[right, z], right - left)):
             g = np.zeros(len(E))
             opp = np.zeros(len(E), bool)
+            tan = np.gradient(E[:, :2], axis=0) if len(E) > 1 else np.zeros((len(E), 2))
+            tan = tan / np.maximum(np.hypot(tan[:, 0], tan[:, 1]), 1e-9)[:, None]
+            out_ = out_ / np.maximum(np.hypot(out_[:, 0], out_[:, 1]), 1e-9)[:, None]
             for owner, O, tv in edges:
                 if owner == own or not len(O):
                     continue
@@ -941,9 +949,22 @@ def _median_gaps(rb, context=()):
                 d = np.where(dz < PARAPET_COVER_DZ, d, np.inf)
                 j = d.argmin(1)
                 d = d[np.arange(len(E)), j]
-                hit = (d < MEDIAN_JOIN_M) & ((g == 0) | (d < g))
+                # (beside, not behind or ahead: a deck going on from this one's end at a merge was a "median" growing
+                # with the distance back to its end, the slab filled toward it and the parapet gone; the two ramps
+                # merging on I-95 by the Middle Branch, 2026-10-31)
+                # and outside this edge (another deck's edge over this one's slab, two merging roads side by side on
+                # one deck: no gap)
+                rel = O[j, :2] - E[:, :2]
+                along = np.abs((rel * tan).sum(1))
+                # (nor this edge's end on another's end: one deck going on from the other, the parapet going on too)
+                ends = np.zeros(len(E), bool)
+                ends[[0, -1]] = (j[[0, -1]] == 0) | (j[[0, -1]] == len(O) - 1)
+                against = (mine * tv[j]).sum(1) < -0.5
+                # (opposite traffic over each other's slab still gets its median barrier between them)
+                hit = ((d < MEDIAN_JOIN_M) & ((g == 0) | (d < g)) & (along <= np.maximum(MEDIAN_ALONG * d, MEDIAN_ALONG_M))
+                       & (((rel * out_).sum(1) > -MEDIAN_INSIDE_M) | against) & ~ends)
                 g = np.where(hit, np.maximum(d, 1e-3), g)
-                opp = np.where(hit, (mine * tv[j]).sum(1) < -0.5, opp)
+                opp = np.where(hit, against, opp)
             sides.append(g)
             opps.append(opp)
         # (an edge facing away from the other deck is near it too where the decks are narrow: only the nearer edge
@@ -1018,7 +1039,14 @@ def _parapet_cover(rb, context=()):
     out = []
     if not rb:
         return out
-    pts, own, A, B, HW, OS = [], [], [], [], [], []
+    pts, own, A, B, HW, OS, EN = [], [], [], [], [], [], []
+
+    def square(k):                  # (its first and last segments end the deck square: earthfast's ends)
+        e = np.zeros(k - 1, np.int64)
+        if k > 1:
+            e[0] |= 1
+            e[-1] |= 2
+        return e
     for n, ((left, right, v, m, layer, z), c) in enumerate(rb):
         lat = left - right
         u = lat / np.maximum(np.hypot(lat[:, 0], lat[:, 1]), 1e-9)[:, None]
@@ -1032,6 +1060,7 @@ def _parapet_cover(rb, context=()):
         B.append(np.c_[mid[1:], z[1:]])
         HW.append(np.full(len(z) - 1, hw))
         OS.append(np.full(len(z) - 1, oid))
+        EN.append(square(len(z)))
     for (left, right, v, m, layer, z), c in context:     # the decks around the tile: surfaces only
         lat = left - right
         mid = (left + right) / 2
@@ -1041,11 +1070,13 @@ def _parapet_cover(rb, context=()):
         B.append(np.c_[mid[1:], z[1:]])
         HW.append(np.full(len(z) - 1, hw))
         OS.append(np.full(len(z) - 1, oid))
+        EN.append(square(len(z)))
     P_, O_ = np.concatenate(pts), np.concatenate(own).astype(np.int64)
     A_, B_, H_, S_ = np.concatenate(A), np.concatenate(B), np.concatenate(HW), np.concatenate(OS).astype(np.int64)
-    fast.require(1, "deck_edges_covered")
+    fast.require(122, "deck_edges_covered")
     cov = np.asarray(fast._ef.deck_edges_covered(np.ascontiguousarray(P_), O_, np.ascontiguousarray(A_),
-                                                  np.ascontiguousarray(B_), H_, S_, PARAPET_COVER_DZ))
+                                                  np.ascontiguousarray(B_), H_, S_, PARAPET_COVER_DZ,
+                                                  np.concatenate(EN)))
     k0 = 0
     for (left, right, v, m, layer, z), c in rb:
         k = len(z)

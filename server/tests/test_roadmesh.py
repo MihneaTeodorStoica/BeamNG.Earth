@@ -197,6 +197,69 @@ class TrimOverlapsTest(unittest.TestCase):
             np.testing.assert_allclose(r[0], ramp[0][0])
 
 
+class MedianGapTest(unittest.TestCase):
+    """The gap from a deck's edge to another deck's across a median: beside it and outside it only (a merge on I-95 by
+    the Middle Branch, 2026-10-31: the decks going on from the joint counted as a median growing behind it, the slab
+    filled out past the road and the parapet gone)."""
+
+    def ribbon(self, x0, x1, y, half, fid, z=50.0):
+        x = np.arange(x0, x1 + 1e-9, 2.0)
+        mid = np.c_[x, np.full(len(x), y)]
+        return ((mid + [0, half], mid - [0, half], x / 10, "m", "base", np.full(len(x), z)), {"fid": fid})
+
+    def test_side_by_side_decks_have_their_gap(self):
+        a, b = self.ribbon(0, 40, 0.0, 4.0, "a"), self.ribbon(0, 40, 10.0, 4.0, "b")
+        (gl, gr, _, _), _ = roadmesh._median_gaps([a, b])
+        np.testing.assert_allclose(gl[2:-2], 2.0)
+        self.assertFalse(gr.any())
+
+    def test_deck_going_on_is_no_median(self):
+        a, b = self.ribbon(0, 40, 0.0, 4.0, "a"), self.ribbon(40, 80, 0.0, 4.0, "b")
+        for gl, gr, _, _ in roadmesh._median_gaps([a, b]):
+            self.assertFalse(gl.any() or gr.any())
+
+    def test_wider_deck_behind_a_merge_is_no_median(self):
+        # two narrower decks ending side by side where a wider one goes on: its edges see their ends behind
+        on = self.ribbon(0, 40, 0.0, 8.4, "on")
+        left, right = self.ribbon(-40, 0, 4.4, 4.0, "l"), self.ribbon(-40, 0, -2.6, 5.8, "r")
+        (gl, gr, _, _), _, _ = roadmesh._median_gaps([on, left, right])
+        self.assertFalse(gl.any() or gr.any(), (gl, gr))
+
+    def test_edge_over_another_deck_is_no_median(self):
+        a, b = self.ribbon(0, 40, 0.0, 4.0, "a"), self.ribbon(0, 40, 6.0, 4.0, "b")    # overlapping by 2 m
+        for gl, gr, _, _ in roadmesh._median_gaps([a, b]):
+            self.assertFalse(gl.any() or gr.any())
+
+    def test_opposite_traffic_over_each_other_keeps_its_median(self):
+        a, b = self.ribbon(0, 40, 0.0, 4.0, "a"), self.ribbon(0, 40, 7.0, 4.0, "b")    # overlapping by 1 m
+        a[1]["tdir"], b[1]["tdir"] = 1, -1
+        (gl, _, ol, _), (_, gr, _, orr) = roadmesh._median_gaps([a, b])
+        self.assertTrue(gl[2:-2].all() and ol[2:-2].all(), "a's left edge: the median toward b's traffic")
+        self.assertTrue(gr[2:-2].all() and orr[2:-2].all())
+
+
+class ParapetCoverTest(unittest.TestCase):
+    """No parapet where another deck's surface lies: over it, not past its square end (two ramps merging into a new
+    road on I-95 by the Middle Branch, 2026-10-31: each deck's round end hid the other's parapet for 7 m)."""
+
+    def ribbon(self, x0, x1, y, half, fid):
+        x = np.arange(x0, x1 + 1e-9, 2.0)
+        mid = np.c_[x, np.full(len(x), y)]
+        return ((mid + [0, half], mid - [0, half], x / 10, "m", "base", np.full(len(x), 50.0)), {"fid": fid})
+
+    def test_deck_going_on_keeps_both_parapets(self):
+        on, ramp = self.ribbon(0, 40, 0.0, 8.4, "on"), self.ribbon(-40, 0, 2.6, 5.8, "ramp")    # left edges flush
+        (cl, _), (cl2, _) = roadmesh._parapet_cover([on, ramp])
+        self.assertFalse(cl.any(), "the wider deck's left edge past the ramp's end")
+        self.assertFalse(cl2.any())
+
+    def test_side_by_side_still_covered(self):
+        a, b = self.ribbon(0, 40, 0.0, 4.0, "a"), self.ribbon(0, 40, 7.0, 4.0, "b")    # overlapping by 1 m
+        (cl, cr), (cl2, cr2) = roadmesh._parapet_cover([a, b])
+        self.assertTrue(cl[1:-1].all() and cr2[1:-1].all(), "(their end points alone open: no run of their own)")
+        self.assertFalse(cr.any() or cl2.any())
+
+
 class BridgeCurbSelectionTest(unittest.TestCase):
     def test_low_curb_is_limited_to_decks_with_mapped_support(self):
         chunks = [

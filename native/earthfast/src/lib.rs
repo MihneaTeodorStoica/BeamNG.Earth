@@ -4077,28 +4077,77 @@ fn subdivide_tris<'py>(py: Python<'py>, pts: PyReadonlyArray2<'py, f64>, tris: P
 /// roadmesh.deck's parapet test: for each deck edge point p (m, 3) of deck owner op (m,), does another deck's surface
 /// lie there: a centre-line segment a -> b (s, 3) of another owner (os, (s,)) nearer in plan than its half width hw (s,)
 /// with its height there within dz of the point's (a ramp leaving the mainline, the carriageways of one road side by
-/// side: no wall between them, 2026-10-17).
+/// side: no wall between them, 2026-10-17). ends (s,): per segment bit 0 its start, bit 1 its end is the deck's own
+/// end, square: nothing at it (within 0.1 m) or past it is under it (a deck going on from another's end at a merge on I-95
+/// by the Middle Branch, 2026-10-31: the round end hid both parapets for 7 m).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (p, op, a, b, hw, os, dz, ends=None))]
 fn deck_edges_covered<'py>(py: Python<'py>, p: PyReadonlyArray2<'py, f64>, op: PyReadonlyArray1<'py, i64>,
                            a: PyReadonlyArray2<'py, f64>, b: PyReadonlyArray2<'py, f64>, hw: PyReadonlyArray1<'py, f64>,
-                           os: PyReadonlyArray1<'py, i64>, dz: f64) -> Bound<'py, PyArray1<bool>> {
+                           os: PyReadonlyArray1<'py, i64>, dz: f64, ends: Option<PyReadonlyArray1<'py, i64>>)
+                           -> Bound<'py, PyArray1<bool>> {
     let (pv, opv, av, bv, hv, osv) = (p.as_array(), op.as_array(), a.as_array(), b.as_array(), hw.as_array(), os.as_array());
+    let ev: Vec<i64> = match &ends {
+        Some(e) => e.as_array().iter().copied().collect(),
+        None => vec![0; av.shape()[0]],
+    };
     let out: Vec<bool> = release(py, pv.shape()[0] * av.shape()[0].max(1), || {
         let ns = av.shape()[0];
         // per segment: start, direction, squared length, half width, z at both ends, owner
-        let seg: Vec<[f64; 9]> = (0..ns).map(|k| {
+        let seg: Vec<[f64; 10]> = (0..ns).map(|k| {
             let (a0, a1, a2) = (av[[k, 0]], av[[k, 1]], av[[k, 2]]);
             let (ab0, ab1) = (bv[[k, 0]] - a0, bv[[k, 1]] - a1);
-            [a0, a1, ab0, ab1, (ab0 * ab0 + ab1 * ab1).max(1e-9), hv[k], a2, bv[[k, 2]], osv[k] as f64]
+            [a0, a1, ab0, ab1, (ab0 * ab0 + ab1 * ab1).max(1e-9), hv[k], a2, bv[[k, 2]], osv[k] as f64,
+             ev.get(k).copied().unwrap_or(0) as f64]
         }).collect();
+        const BAND_M: f64 = 0.5;        // m: the band inside hw along a deck's edges (roadmesh.PARAPET_W, 0.45)
+        const END_M: f64 = 1.0;
+        // per segment its deck's square ends (point, unit direction into the deck), where it has them: the segments
+        // from a start (bit 0) to the next end (bit 1) are one deck's
+        let mut planes: Vec<(Option<[f64; 4]>, Option<[f64; 4]>)> = vec![(None, None); ns];
+        let mut k = 0;
+        while k < ns {
+            if ev.get(k).copied().unwrap_or(0) & 1 == 0 {
+                k += 1;
+                continue;
+            }
+            let mut e = k;
+            while e < ns && ev.get(e).copied().unwrap_or(0) & 2 == 0 {
+                e += 1;
+            }
+            if e >= ns {
+                break;
+            }
+            let (gs, ge) = (&seg[k], &seg[e]);
+            let (ls, le) = (gs[4].sqrt(), ge[4].sqrt());
+            let start = [gs[0], gs[1], gs[2] / ls, gs[3] / ls];
+            let end = [ge[0] + ge[2], ge[1] + ge[3], -ge[2] / le, -ge[3] / le];
+            for q in planes.iter_mut().take(e + 1).skip(k) {
+                *q = (Some(start), Some(end));
+            }
+            k = e + 1;
+        }
         (0..pv.shape()[0]).map(|i| {
             let (p0, p1, p2, o) = (pv[[i, 0]], pv[[i, 1]], pv[[i, 2]], opv[i] as f64);
-            seg.iter().any(|g| {
+            seg.iter().zip(planes.iter()).any(|(g, pl)| {
                 if g[8] == o { return false; }
                 let t = (((p0 - g[0]) * g[2] + (p1 - g[1]) * g[3]) / g[4]).clamp(0.0, 1.0);
                 let d = (p0 - (g[0] + t * g[2])).hypot(p1 - (g[1] + t * g[3]));
-                d < g[5] && (p2 - (g[6] + t * (g[7] - g[6]))).abs() < dz
+                if !(d < g[5] && (p2 - (g[6] + t * (g[7] - g[6]))).abs() < dz) {
+                    return false;
+                }
+                // at or past the deck's square end; within END_M of it only over its slab, not its edge's band (a
+                // deck going on at a slight angle from this one's end, their outer edges flush: its corner was in
+                // the band, both parapets gone there)
+                let edge_band = d > g[5] - BAND_M;
+                for q in [pl.0, pl.1].into_iter().flatten() {
+                    let into = (p0 - q[0]) * q[2] + (p1 - q[1]) * q[3];
+                    if into < 0.1 || (edge_band && into < END_M) {
+                        return false;
+                    }
+                }
+                true
             })
         }).collect()
     });
@@ -5336,6 +5385,6 @@ fn earthfast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fartex::season_img, m)?)?;
     m.add_function(wrap_pyfunction!(fartex::dds_levels, m)?)?;
     m.add_function(wrap_pyfunction!(fartex::jpeg_rgb, m)?)?;
-    m.add("VERSION", 121)?;
+    m.add("VERSION", 122)?;
     Ok(())
 }
