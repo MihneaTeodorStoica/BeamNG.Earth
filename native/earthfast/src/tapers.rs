@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 /// lonlat (P, 2) of the roads' lines, off (n + 1) into it; attrs (n, 5): width (NaN: no ground spec), class code (< 0:
 /// none), deck at start (0/1), deck at end (0/1), deck width (NaN: no bridge); own (R, 2): (road, fraction along it) of
-/// its own deck's ends inside it (ground roads taper where two meet, at a deck anywhere); params: m per m, shortest, longest, share of the road, least change, most turn (deg).
+/// its own deck's ends inside it (roads taper only where two meet); params: m per m, shortest, longest, share of the road, least change, most turn (deg).
 /// Returns (T, 5): road, lon, lat, width at the joint, length (m), in road order then end 0, end 1, own decks.
 #[pyfunction]
 pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: PyReadonlyArray1<'py, i64>,
@@ -97,8 +97,11 @@ pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
                 if wj.is_nan() || (w - wj).abs() < min_dw {
                     continue;
                 }
-                if !deck && meeting > 2 {
-                    continue;                   // (a junction: the width changes across it, as real streets do)
+                if meeting > 2 {
+                    // a junction: the width changes across it, as real streets' do; a deck's end where it splits into
+                    // the carriageways of a divided road (East Pratt Street's 21.8 m deck into two 12 m ones): each
+                    // widened to the deck's width over the other and the river bank, under the trees beside them
+                    continue;
                 }
                 let target = if deck { wj } else { 0.5 * (w + wj) };
                 rows.push([i as f64, lon, lat, target, span((w - wj).abs(), length)]);
