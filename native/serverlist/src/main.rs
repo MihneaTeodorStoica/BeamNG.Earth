@@ -3,11 +3,13 @@
 //! BeamMP's public list, which every BeamMP player sees); its plugin announces it here every minute instead, and the
 //! game's BeamNG.Earth tab reads the list.
 //!
-//! POST /announce  {"port": 30814, "name": "...", "players": 2, "maxPlayers": 8, "version": "1.6.2", "place": "...",
-//!                 "desc": "..."}
+//! POST /announce  {"port": 30814, "name": "...", "players": 2, "maxPlayers": 8, "version": "3.9.0", "place": "...",
+//!                 "desc", "tags", "map", "modlist", "modstotalsize", "modstotal", "playerslist", "pass"}: what BeamMP's own
+//!                 heartbeat sends its list (BeamMP-Server THeartbeatThread), but never its key, and the address is not taken from it.
 //!                 The address is the one the request comes from (behind a local reverse proxy: its X-Forwarded-For),
 //!                 never the body's: a server can only list itself. Entries go TTL_S after their last announce.
-//! GET  /servers   [{"ip", "port", "name", "players", "maxPlayers", "version", "place", "desc", "age"}], newest first.
+//! GET  /servers   [{"ip", "port", "name", "players", "maxPlayers", "version", "place", "desc", "tags", "map", "modlist", "modstotalsize",
+//!                 "modstotal", "playerslist", "pass", "location", "age"}], newest first.
 //!
 //! Each server's "location" is the country its address is in (as BeamMP's own list has it, for the flag): DB-IP's
 //! IP to Country Lite table (CC BY 4.0, https://db-ip.com), downloaded next to the binary and fetched again weekly.
@@ -28,7 +30,7 @@ const TTL: Duration = Duration::from_secs(180);
 const MIN_GAP: Duration = Duration::from_secs(20); // announces from one server closer than this are refused
 const MAX_SERVERS: usize = 1000;
 const MAX_PER_IP: usize = 8; // servers one address may list (one per port)
-const MAX_BODY: usize = 4096;
+const MAX_BODY: usize = 16384; // (a long mod list)
 const MAX_DESC: usize = 256; // a description's characters kept
 const GEOIP_URL: &str = "https://download.db-ip.com/free/dbip-country-lite-{ym}.csv.gz";
 const GEOIP_MAX_AGE: Duration = Duration::from_secs(7 * 86400); // the table is fetched again after this
@@ -44,6 +46,13 @@ struct Announce {
     version: Option<String>,
     place: Option<String>,
     desc: Option<String>, // ServerConfig.toml's Description (BeamMP's list shows it under the name)
+    tags: Option<String>,
+    map: Option<String>,
+    modlist: Option<String>, // "/name;" per client mod, as BeamMP's TResourceManager lists them
+    modstotalsize: Option<u64>,
+    modstotal: Option<u32>,
+    playerslist: Option<String>, // "name;" per connected player
+    pass: Option<bool>,      // has a password (never the password)
 }
 
 #[derive(Serialize, Clone)]
@@ -57,6 +66,13 @@ struct Listed {
     version: String,
     place: String,
     desc: String,
+    tags: String,
+    map: String,
+    modlist: String,
+    modstotalsize: u64,
+    modstotal: u32,
+    playerslist: String,
+    pass: bool,
     location: String, // ISO country code of the server's address ("" unknown)
     age: u64,
 }
@@ -255,6 +271,13 @@ impl List {
             version: clean(a.version, 24),
             place: clean(a.place, 64),
             desc: clean(a.desc, MAX_DESC),
+            tags: clean(a.tags, 256),
+            map: clean(a.map, 128),
+            modlist: clean(a.modlist, 8192),
+            modstotalsize: a.modstotalsize.unwrap_or(0),
+            modstotal: a.modstotal.unwrap_or(0).min(100_000),
+            playerslist: clean(a.playerslist, 2048),
+            pass: a.pass.unwrap_or(false),
             location: String::new(),
             age: 0,
         };
@@ -317,7 +340,9 @@ mod tests {
 
     fn ann(port: u16, name: &str) -> Announce {
         Announce { port, name: Some(name.into()), players: Some(2), max_players: Some(8), version: Some("1.6.2".into()),
-            place: None, desc: Some("Drive\u{7} anywhere".into()) }
+            place: None, desc: Some("Drive\u{7} anywhere".into()), tags: Some("Freeroam".into()), map: None,
+            modlist: Some("/a;/b;".into()), modstotalsize: Some(1024), modstotal: Some(2), playerslist: Some("x;".into()),
+            pass: None }
     }
 
     #[test]
@@ -331,6 +356,7 @@ mod tests {
         assert_eq!(s[0].name, "Ab");
         assert_eq!(s[0].ip, "203.0.113.5");
         assert_eq!(s[0].desc, "Drive anywhere");
+        assert_eq!((s[0].modlist.as_str(), s[0].modstotal, s[0].modstotalsize, s[0].pass), ("/a;/b;", 2, 1024, false));
         assert!(l.servers(t0 + TTL + Duration::from_secs(1), &Geo::default()).is_empty());
     }
 
