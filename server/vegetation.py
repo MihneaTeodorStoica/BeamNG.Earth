@@ -33,9 +33,10 @@ import staging
 
 log = logging.getLogger("earthd.vegetation")
 
-VERSION = 19          # (the cached cells hold their groups: 14 for the regional rules of GitHub #110; 16: the roads'
+VERSION = 20          # (the cached cells hold their groups: 14 for the regional rules of GitHub #110; 16: the roads'
                       # drawn widths and sidewalks kept clear; 17: BC's lidar canopy heights, mapdata's canopy layer 2;
-                      # 18: the rounded junction corners kept clear, roadcorners.py; 19: one tree per flat crown, thin_tops)
+                      # 18: the rounded junction corners kept clear, roadcorners.py; 19: one tree per flat crown, thin_tops; 20: none on or
+                      # beside a bridge deck, _mask_decks)
 TREE_MIN_M = 3.0
 CROWN_SPACING = 0.5          # tops kept this many crown radii apart (0.8 looked sparse: the user, 2026-10-13)
 BUSH_MIN_M = 1.0
@@ -300,6 +301,7 @@ class Vegetation:
         curb = np.zeros(h.shape, bool)      # the roads themselves (+ TREE_PIT_M): where a street tree may not land
         push = np.zeros((3,) + h.shape, np.float32)
         push[2] = np.inf
+        deck = np.zeros(h.shape, bool)      # bridge decks (+ DECK_CLEAR_M): no tree on, beside or moved off one
         road_cells = []
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
@@ -313,6 +315,7 @@ class Vegetation:
                 _mask_polys(c2.layers.get("water"), blocked, chm, 0.0, kind=3)
                 _mask_roads(c2.layers.get("roads"), road, chm, specs=self._specs, walks=True)
                 _mask_roads(c2.layers.get("roads"), curb, chm, push, clear=TREE_PIT_M, specs=self._specs)
+                _mask_decks(c2.layers.get("roads"), deck, chm, self._specs)
                 road_cells.append(c2.layers.get("roads"))
         # the rounded corners of curbless junctions (roadcorners.py): no tree, bush or rock on their asphalt
         _mask_corners(road_cells, (road, curb), chm, cd.bounds, getattr(self.surface, "urban", None), self.widths)
@@ -329,6 +332,8 @@ class Vegetation:
         tops[:, ~ci] = False
         # street trees: a top over a road corridor (its crown overhangs the street) moves just out of it,
         # onto the verge / sidewalk by the curb, unless that lands on a building, water or another road
+        tops &= ~deck                       # (over a deck: the crown of a tree below it, or none; not moved off it
+        blocked |= deck                     # onto the river or the bank under the deck, East Pratt Street 2026-10-31)
         on_road = tops & road
         tops &= ~road
         rj_, ri_ = np.nonzero(on_road)
@@ -590,6 +595,48 @@ def _mask_corners(road_cells, masks, chm, bounds, urban=None, widths=None, grow=
                           [(mapgeom.POLYGON, [[np.c_[lo, la]]]) for la, lo in pads])
     for m in masks:
         _mask_polys(feats, m, chm, 0.0)
+
+
+DECK_CLEAR_M = 2.0          # m past a bridge deck's edge (its sidewalks and parapets) no tree stands
+
+
+def _mask_decks(f, mask, chm, specs):
+    """Mark the bridge decks of road Features f on the CHM-grid mask: each bridge piece (roads.bridge_parts) its deck
+    wide (roads.bridge_specs, and the sidewalks it carries: roads.deck_walks with specs(f), the ground widths) +
+    DECK_CLEAR_M either side. A street tree whose crown is over a road moves to its edge (_mask_roads' push): over a
+    deck that edge is the river or the bank below it, where the trees stood in the air or up through the deck."""
+    if f is None or not len(f.kind):
+        return
+    import roads as roadsmod
+    try:
+        bspecs = roadsmod.bridge_specs(f)
+    except Exception as e:              # (no bridge to keep clear: as _specs)
+        log.debug("vegetation: bridge specs: %s: %s", type(e).__name__, e)
+        return
+    if not any(b is not None for b in bspecs):
+        return
+    ground = specs(f) if specs is not None else roadsmod.road_specs(f)
+    n_r, n_c = mask.shape
+    segs, hws = [], []
+    for i, b in enumerate(bspecs):
+        if b is None:
+            continue
+        walk = roadsmod.deck_walks(f, i, ground)
+        half_m = b.width / 2 + (walk[0] if walk else 0.0) + DECK_CLEAR_M      # (one side's: as wide either side)
+        for ring in roadsmod.bridge_parts(f, i):
+            ring = np.asarray(ring, np.float64)
+            if len(ring) < 2:
+                continue
+            x, y = _to3857(ring[:, 0], ring[:, 1])
+            c, r = (np.asarray(x) - chm.x0) / chm.dx, (chm.y0 - np.asarray(y)) / chm.dy
+            hw = half_m / (chm.dx * max(0.05, math.cos(math.radians(float(ring[:, 1].mean())))))
+            if c.max() < -hw or r.max() < -hw or c.min() > n_c + hw or r.min() > n_r + hw:
+                continue
+            segs.append(np.stack([c[:-1], r[:-1], c[1:], r[1:]], axis=1))
+            hws.append(np.full(len(c) - 1, hw))
+    if segs:
+        fast._ef.road_corridors(mask, None, np.ascontiguousarray(np.concatenate(segs), np.float64),
+                                np.ascontiguousarray(np.concatenate(hws), np.float64))
 
 
 def _mask_roads(f, mask, chm, push=None, clear=ROAD_CLEAR_M, specs=None, walks=False):
