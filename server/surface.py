@@ -319,11 +319,14 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
         if not walks:
             add(verge, c, r, width / 2 + ROAD_EDGE_M + VERGE_M)    # (VERGE_M past the road's material)
 
+    copies = roadsmod.copies_of(feats_list)     # (each joint's taper from its own cell: roads.joint_desc)
+
+    def taper_of(f):
+        return roadsmod.road_tapers(f, urban_fn, widths)
     for feats in feats_list:
         if feats is None or len(feats) == 0:
             continue
         specs = roadsmod.road_specs(feats, urban_fn, widths)
-        tapers = roadsmod.road_tapers(feats, urban_fn, widths)
         box = _lonlat_boxes(feats)
         bc, br = to_px(box[:, [0, 1, 0, 1]], box[:, [2, 2, 3, 3]])     # the boxes' corners on the grid
         c_lo, c_hi, r_lo, r_hi = bc.min(1), bc.max(1), br.min(1), br.max(1)
@@ -343,7 +346,8 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
             mw = roadsmod.median_width(specs[i])
             ms = roadsmod.median_side(specs[i])
             for ring in roadsmod.ground_parts(feats, i):      # not bridges / tunnels
-                line(ring[:, 0], ring[:, 1], specs[i], aisle, tapers[i])
+                line(ring[:, 0], ring[:, 1], specs[i], aisle,
+                     roadsmod.joint_desc(copies.get(fid, [(feats, i)]), taper_of))
                 if ms is not None and mw > roadsmod.MEDIAN_SLAB_M and len(ring) >= 2:
                     # the median's ground: lawn (report #48, Boston Street, 2026-10-17)
                     sc = np.array([111320.0 * math.cos(math.radians(float(ring[0, 1]))), 110540.0])
@@ -450,11 +454,14 @@ def _road_segments(frame, x0, y0, size, w, h, feats_list, urban_fn=None, widths=
     segs, hws, kind = [], [], []
     nroad = 0
     seen = set()
+    copies = roadsmod.copies_of(feats_list)     # (each joint's taper from its own cell: roads.joint_desc)
+
+    def taper_of(f):
+        return roadsmod.road_tapers(f, urban_fn, widths)
     for feats in feats_list:
         if feats is None or len(feats) == 0:
             continue
         specs = roadsmod.road_specs(feats, urban_fn, widths)
-        tapers = roadsmod.road_tapers(feats, urban_fn, widths)
         box = _feature_boxes(feats, frame)
         ids = feats.ids.tolist()
         for i in range(len(feats)):
@@ -474,7 +481,8 @@ def _road_segments(frame, x0, y0, size, w, h, feats_list, urban_fn=None, widths=
                 if len(c) < 2 or c.max() < -hw or c.min() > w + hw or r.max() < -hw or r.min() > h + hw:
                     continue
                 segs.append(np.stack([c[:-1], r[:-1], c[1:], r[1:]], axis=1))
-                ws = roadsmod.taper_widths(sp.width, tapers[i], ring[:, 0], ring[:, 1])   # (tapered: road_tapers)
+                ws = roadsmod.taper_widths(sp.width, roadsmod.joint_desc(copies.get(fid, [(feats, i)]), taper_of),
+                                           ring[:, 0], ring[:, 1])   # (tapered: road_tapers, each joint's own cell)
                 if ws is None:
                     hws.append(np.full(len(c) - 1, hw))
                 else:

@@ -1603,6 +1603,38 @@ def _tapers(feats, specs, decks=False):
     return out
 
 
+def joint_desc(copies, fn):
+    """The tapers / shifts (fn(feats)[i]: ((lon, lat, ...), ...)) of a road from its copies [(feats, i)] in the cells at
+    hand, each joint's from the copy in the cell the joint lies in: that cell holds every road meeting there, a copy
+    elsewhere may not and found another (a Springfield Interchange ramp's deck tapered in one cell and not in the
+    next, a 0.9 m step; deckedges.py 2026-10-31). A joint whose cell is not at hand: any copy's. Pure."""
+    import mapcells
+    out, other = {}, {}
+    for f, i in copies:
+        cid = f.__dict__.get("_bnge_cell")
+        cid = cid[0] if cid else None
+        for d in fn(f)[i] or ():
+            key = (round(d[0], 6), round(d[1], 6))
+            if cid is None or str(mapcells.cell_of(d[1], d[0])) == cid:
+                out[key] = d
+            else:
+                other.setdefault(key, d)
+    for key, d in other.items():
+        out.setdefault(key, d)
+    return tuple(out[k] for k in sorted(out))
+
+
+def copies_of(cells):
+    """{road id: [(feats, i)]}: every copy of each road in cells (joint_desc)."""
+    where = {}
+    for f in cells or ():
+        if f is None:
+            continue
+        for i, fid in enumerate(f.ids.tolist()):
+            where.setdefault(str(fid), []).append((f, i))
+    return where
+
+
 def deck_tapers(feats):
     """Per feature: the tapers of its deck where it meets another deck end to end at another width (both run to half
     way: _tapers' deck mode), as road_tapers. A deck kept its width at such a joint: the I-95 viaduct by the Middle
@@ -1617,19 +1649,14 @@ def deck_tapers(feats):
 def deck_width_fn(frame, cells):
     """ws_of(fid, pts (k, 2+)) -> per point the width of deck part fid (its bridge spec's, tapered where it meets
     another deck: deck_tapers of its feature in cells), or None where no taper reaches it."""
-    where = {}
-    for f in cells or ():
-        if f is None:
-            continue
-        for i, fid in enumerate(f.ids.tolist()):
-            where.setdefault(str(fid), (f, i))
+    where = copies_of(cells)
 
     def ws_of(fid, pts):
         got = where.get(str(fid))
-        if got is None:
+        if not got:
             return None
-        tp = deck_tapers(got[0])[got[1]]
-        bs = bridge_specs(got[0])[got[1]]
+        tp = joint_desc(got, deck_tapers)
+        bs = bridge_specs(got[0][0])[got[0][1]]
         if not tp or bs is None:
             return None
         pts = np.asarray(pts, np.float64)
@@ -7049,18 +7076,13 @@ def deck_shift_fn(frame, cells, urban_fn=None, widths=None, left_hand=False):
     """shift_of(fid, pts (k, 2+)) -> per point the lateral shift (m, + left) of deck part fid at a merge / split
     (lane_shifts of its feature in cells, the tile's road specs), or None: one rule for the deck chunks (build_tile)
     and the junction pads round a tile (deck_pads' callers), so a fork's pad meets its decks."""
-    where = {}
-    for f in cells or ():
-        if f is None:
-            continue
-        for i, fid in enumerate(f.ids.tolist()):
-            where.setdefault(str(fid), (f, i))
+    where = copies_of(cells)
 
     def shift_of(fid, pts):
         got = where.get(str(fid))
-        if got is None:
+        if not got:
             return None
-        ls = lane_shifts(got[0], urban_fn, widths, left_hand)[got[1]]
+        ls = joint_desc(got, lambda f: lane_shifts(f, urban_fn, widths, left_hand))
         if not ls:
             return None
         pts = np.asarray(pts, np.float64)
@@ -7561,6 +7583,7 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
         if dwk:
             deck_walk[fid] = dwk
     deck_shift = deck_shift_fn(frame, cells, urban_fn, widths, left_hand)   # (a deck at a merge / split)
+    road_copies = copies_of(cells)              # (a joint's taper / shift from its own cell: joint_desc)
     deck_width = deck_width_fn(frame, cells)    # (a deck tapering into another deck)
     for ch in _bridge_chunks(frame, bseen, elev, (x0, y0, x1, y1), bridges, cells, deck_walk, deck_shift, deck_width):
         if ch.get("deck"):
@@ -7701,15 +7724,13 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
     for fid, spec, pts, lon in roads:
         ws = None                               # (tapered where it meets a road of another width: road_tapers)
         if fid in seen and fid not in jinternal:
-            tf, ti = seen[fid][:2]
-            tp = road_tapers(tf, urban_fn, widths, left_hand)[ti]
+            tp = joint_desc(road_copies.get(fid, [seen[fid][:2]]), lambda f: road_tapers(f, urban_fn, widths, left_hand))
             if tp:
                 tla, tlo, _ = frame.enu_to_geodetic(pts[:, 0], pts[:, 1], 0.0)
                 ws = taper_widths(spec.width, tp, tlo, tla)
         sh = None                               # (its lines shifted at a merge / split: lane_shifts)
         if fid in seen and fid not in jinternal:
-            tf, ti = seen[fid][:2]
-            ls = lane_shifts(tf, urban_fn, widths, left_hand)[ti]
+            ls = joint_desc(road_copies.get(fid, [seen[fid][:2]]), lambda f: lane_shifts(f, urban_fn, widths, left_hand))
             if ls:
                 sla, slo, _ = frame.enu_to_geodetic(pts[:, 0], pts[:, 1], 0.0)
                 sh = shift_at(ls, slo, sla)
