@@ -75,11 +75,12 @@ def _normals(xy):
 
 
 def ribbon_pairs(chunks):
-    """[(ribbon, its chunk)]: ribbons() of each chunk with it (ribbons() leaves out a chunk too short)."""
-    return [(r, c) for c in chunks for r in ribbons([c])]
+    """[(ribbon, its chunk)]: ribbons() of each chunk with it (ribbons() leaves out a chunk too short); one batched
+    ribbons() call (per chunk it was the cost the batch removed)."""
+    return [(r, c) for r, c in zip(ribbons(chunks, keep_none=True), chunks) if r is not None]
 
 
-def ribbons(chunks):
+def ribbons(chunks, keep_none=False):
     """Per chunk: (left (k, 2), right (k, 2), v (k,), material, layer, z (k,) or None) in the anchor
     frame; z: the chunk's own heights where it is "fixed" (bridge decks), else None (draped). Pure. The draped and
     plain chunks' resampling and normals in one Rust call (earthfast.ribbon_edges: numpy per chunk was ~0.9 s of 8
@@ -113,7 +114,7 @@ def ribbons(chunks):
             c = chunks[k]
             out[k] = (L[a:b], R[a:b], S[a:b] / float(c.get("tl") or 10.0), c["m"], layer_of(c),
                       Z[a:b] if c.get("fixed") else None)
-    return [r for r in out if r is not None]
+    return out if keep_none else [r for r in out if r is not None]
 
 
 TRIM_DZ = (0.3, 4.5)                # m: another deck overlapping a deck in plan this far above or below it (two
@@ -353,10 +354,11 @@ def build(frame, chunks, elev, origin, lift=0.0, clip=None, follow=False, q=None
     chunks = [c for c in chunks if not c.get("tube_only")]  # (twin tunnels' tube: no road surface, roads._tunnel_chunks)
     if clip is not None:
         chunks = [_reach_past(c, clip) for c in chunks]
-    rb = ribbons(chunks)                        # deck surfaces too: their asphalt over deck()'s concrete
-    if any(r[5] is not None for r in rb):       # (trimmed as deck() trims their slabs: context, the decks around)
+    rbc = ribbon_pairs(chunks)                  # deck surfaces too: their asphalt over deck()'s concrete
+    if any(r[5] is not None for r, _c in rbc):  # (trimmed as deck() trims their slabs: context, the decks around)
         ctx = [(r, c) for r, c in ribbon_pairs(list(context)) if r[5] is not None]
-        rb = [r for r, _c in trim_overlaps(ribbon_pairs(chunks), ctx)]
+        rbc = list(trim_overlaps(rbc, ctx))
+    rb = [r for r, _c in rbc]
     polys = [c for c in chunks if c.get("poly")]
     if not rb and not polys:
         return None
@@ -371,7 +373,7 @@ def build(frame, chunks, elev, origin, lift=0.0, clip=None, follow=False, q=None
     P, UV, T, M = [], [], [], []
     TL = []                                     # per triangle: its layer's lift over the ground (None: on a deck)
     k0 = nverts = 0
-    for left, right, v, m, layer, fz in rb:
+    for (left, right, v, m, layer, fz), c in rbc:
         k = len(left)
         if fz is None:
             z = u[k0:k0 + 2 * k] + LIFT[layer] + lift
@@ -382,7 +384,8 @@ def build(frame, chunks, elev, origin, lift=0.0, clip=None, follow=False, q=None
             mats.append(m)
         mi = mats.index(m)
         P.append(np.c_[np.concatenate([left, right]), z])
-        UV.append(np.column_stack((np.concatenate((np.zeros(k), np.ones(k))), np.concatenate((v, v)))))
+        UV.append(np.column_stack((np.concatenate((np.zeros(k), np.full(k, float(c.get("tu") or 1.0)))),
+                                   np.concatenate((v, v)))))     # ("tu": the texture's repeats across, else once)
         i = np.arange(k - 1)
         A, A1, B, B1 = nverts + i, nverts + i + 1, nverts + k + i, nverts + k + i + 1
         # left edge to the left of the direction: (A, B, B1) is counter-clockwise seen from above

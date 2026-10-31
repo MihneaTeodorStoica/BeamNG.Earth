@@ -7070,8 +7070,10 @@ DECK_WALK_LIFT_M = 0.03         # m the strip is drawn over the deck (no z fight
 # deck pale concrete; the user, 2026-10-31: "the entire real bridge is concrete ... concrete shoulders [alone] don't
 # look good or realistic")
 DECK_CONCRETE_CLASSES = {"motorway", "trunk"}
-DECK_CONCRETE = {"m": "bne_bridge_concrete", "tl": 11.0, "p": 20}   # (the slab's grey: m_gm_concrete_plain was near
-                                                                    # white, the white lane lines lost on it)
+# the stock highway concrete (West Coast USA's road_concrete: tined, jointed; its square tile two lanes wide), the
+# texture once per DECK_CONCRETE_TILE_M across ("tu") and as long along; the plain slab concrete looked like paving slabs
+DECK_CONCRETE_TILE_M = 7.3
+DECK_CONCRETE = {"m": "bne_highway_concrete", "tl": DECK_CONCRETE_TILE_M, "p": 20}
 
 
 def _travel(spec):
@@ -7155,6 +7157,8 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                 if len(c) >= 2:
                     ch = _chunk({**_deck_look(spec), "deck": True}, dw, c)
                     ch.update(fixed=True, deck=True, fid=fid, ctx=True, tdir=_travel(spec))
+                    if ch["m"] == DECK_CONCRETE["m"]:
+                        ch["tu"] = round(max(1.0, dw / DECK_CONCRETE_TILE_M), 3)
                     if depths and fid in depths:
                         ch["dd"] = round(float(depths[fid]), 3)
                     out.append(ch)
@@ -7176,6 +7180,8 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                     if len(c) >= 2:
                         ch = _chunk(look, w, c)
                         ch["fixed"] = True
+                        if ch["m"] == DECK_CONCRETE["m"]:    # (its tile two lanes wide: DECK_CONCRETE_TILE_M)
+                            ch["tu"] = round(max(1.0, w / DECK_CONCRETE_TILE_M), 3)
                         if look.get("deck"):
                             ch["deck"] = True
                             ch["fid"] = fid             # (roadmesh.deck: no parapet between parts side by side)
