@@ -204,7 +204,7 @@ function G.config()
   return { time = G.timeConfig(G.TIME, G.TIME_SPEED, G.started), weather = G.WEATHERS[w] and w or nil }
 end
 
--- Pure: the server's name, port and player cap from ServerConfig.toml's text.
+-- Pure: the server's name, description, port and player cap from ServerConfig.toml's text.
 function G.readConfig(text)
   local cfg = {}
   for line in tostring(text or ''):gmatch('[^\r\n]+') do
@@ -213,6 +213,7 @@ function G.readConfig(text)
       local str = v:match('^"(.-)"')        -- (a string first: a # inside it is not a comment)
       v = v:gsub('%s*#.*$', '')
       if k == 'Name' and str then cfg.name = str
+      elseif k == 'Description' and str then cfg.desc = str
       elseif k == 'Port' then cfg.port = tonumber(v)
       elseif k == 'MaxPlayers' then cfg.maxPlayers = tonumber(v)
       elseif k == 'Private' then cfg.private = v == 'true'
@@ -232,7 +233,7 @@ function G.listable(cfg)
   return G.LISTED ~= false and cfg.private == false and G.validKey(cfg.authKey)
 end
 
--- Pure: what the list shows of this server: { port, name, players, maxPlayers, place } (place: where the players are,
+-- Pure: what the list shows of this server: { port, name, desc, players, maxPlayers, place } (place: where the players are,
 -- to a tenth of a degree, from the longest-joined player; nil when no one is on).
 function G.announcement(cfg, players)
   local first = nil
@@ -241,7 +242,7 @@ function G.announcement(cfg, players)
   end
   local n = 0
   for _ in pairs(players) do n = n + 1 end
-  return { port = cfg.port, name = cfg.name, players = n, maxPlayers = cfg.maxPlayers,
+  return { port = cfg.port, name = cfg.name, desc = cfg.desc, players = n, maxPlayers = cfg.maxPlayers,
     place = first and string.format('%.1f, %.1f', first.lat, first.lon) or nil }
 end
 

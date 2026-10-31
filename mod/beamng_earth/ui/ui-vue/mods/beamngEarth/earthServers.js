@@ -66,7 +66,8 @@ function toBeamMP(s, i) {
     map: "BeamNG.Earth", mapName: "BeamNG.Earth",
     players: s.players, maxplayers: s.maxPlayers, playerslist: "",
     version: s.version || "", location: s.location || "", owner: "",
-    sdesc: s.place ? `The world around ${s.place}` : "", tags: "", tagsList: [], modlist: "", modstotalsize: 0,
+    // the server's own description (ServerConfig.toml), else where its players are
+    sdesc: s.desc || (s.place ? `The world around ${s.place}` : ""), tags: "", tagsList: [], modlist: "", modstotalsize: 0,
     endpoint, id: `${endpoint}#bnge${i}`, bngeEarth: true, bngeOfficial: !!s.official,
   }
 }

@@ -89,6 +89,8 @@ local key = '3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b'
 T.check(G.validKey(key) and not G.validKey(zeros) and not G.validKey('') and not G.validKey(nil) and not G.validKey('abc'),
   'validKey: a key, not the placeholder or junk')
 T.check(G.readConfig('AuthKey = "' .. key .. '"').authKey == key, 'readConfig: the key')
+T.check(G.readConfig('Description = "Drive # anywhere" # c').desc == 'Drive # anywhere', 'readConfig: the description')
+T.check(G.announcement({ port = 1, desc = 'd' }, {}).desc == 'd', 'announcement: the description')
 T.check(G.listable({ private = false, authKey = key }), 'listable: public with a key')
 T.check(not G.listable({ private = true, authKey = key }), 'listable: Private = true: direct connect only')
 T.check(not G.listable({ private = false, authKey = zeros }), 'listable: no key: direct connect only')
