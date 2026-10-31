@@ -1784,6 +1784,7 @@ def tunnel_specs(feats):
 def _bridge_specs(feats, want="bridge"):
     out = []
     rules = feats.rules
+    ground = road_specs(feats)      # (rural: no parking on a deck; its divided carriageways, dual_carriageways)
     for i in range(len(feats)):
         cls = str(feats.attrs["class"][i]) if "class" in feats.attrs else "unknown"
         if str(feats.attrs.get("subtype", ["road"] * len(feats))[i]) != "road" or cls not in STYLE or unbuilt(feats, i):
@@ -1809,8 +1810,16 @@ def _bridge_specs(feats, want="bridge"):
         link = _rule_value(rules.get("subclass"), i) == "link"
         if rule_w is None and link and lanes is None:
             rule_w = LINK_M[1] if ow else LINK_M[2]
-        out.append(Spec(carriageway(cls, kind, False, rule_w, ow, lanes), kind, False, cls, ow,
-                        lanes=lanes, surf=surface_token(surf)))
+        sp = Spec(carriageway(cls, kind, False, rule_w, ow, lanes), kind, False, cls, ow, lanes=lanes,
+                  surf=surface_token(surf), link=link)
+        g = ground[i] if ground is not None else None
+        if g is not None and g.median:
+            # one carriageway of a divided road (dual_carriageways on its ground specs): its deck one carriageway wide,
+            # as its approaches; it was the class's two-way width (Baltimore's motorways: 18.8 m decks on 12 m roads,
+            # the user 2026-10-31: "bridge widths dont always match the road widths")
+            w = sp.width if ow or rule_w is not None else carriageway(cls, kind, False, None, True, lanes)
+            sp = sp._replace(oneway=True, dir=g.dir, median=g.median, width=dual_cap(g.median, w))
+        out.append(sp)
     return out
 
 
