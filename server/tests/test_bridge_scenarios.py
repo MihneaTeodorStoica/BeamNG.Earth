@@ -162,5 +162,53 @@ class LaneTaperScenarios(unittest.TestCase):
         self.assertAlmostEqual(float(np.abs(plain[0][-1, 1])), 10.0 / 2 - roads.EDGE_LINE["inset"], delta=0.05,
                                msg="(without ws: as before)")
 
+
+def urban(la, lo):
+    return np.ones(np.shape(la), bool)
+
+
+class DeckSidewalkScenarios(unittest.TestCase):
+    """A city street's bridge carries its sidewalks (the user, 2026-10-31, East Pratt Street over the Jones Falls): the
+    deck wider by them, a concrete strip each side of the carriageway."""
+
+    def test_city_street_bridge_carries_its_sidewalks(self):
+        f = features([[(-200, 0), (200, 0)]], ["residential"], flags=[(0, "is_bridge", 0.4, 0.6)], ids=["r0"])
+        walk = roads.deck_walks(f, 0, roads.road_specs(f, urban))
+        self.assertIsNotNone(walk)
+        wm, sides = walk
+        self.assertEqual(set(sides), {1, -1})
+        spec = roads.bridge_specs(f)[0]
+        pts = np.c_[np.linspace(-40, 40, 9), np.zeros(9), np.full(9, 15.0)]
+        chunks = roads._deck_chunks([("r0", spec, pts, -76.6)], (-100, -100, 100, 100), walks={"r0": walk})
+        deck = [c for c in chunks if c.get("deck") and not c.get("ctx")]
+        self.assertTrue(deck)
+        self.assertAlmostEqual(deck[0]["w"], spec.width + 2 * wm, delta=0.01, msg="the slab wider by both sidewalks")
+        strips = [c for c in chunks if c["m"] == roads.DECK_WALK["m"]]
+        self.assertEqual(len(strips), 2)
+        for c in strips:
+            y = abs(np.asarray(c["n"])[0][1])
+            self.assertAlmostEqual(y, spec.width / 2 + wm / 2, delta=0.05, msg="beside the carriageway")
+            self.assertAlmostEqual(np.asarray(c["n"])[0][2], 15.0 + roads.DECK_WALK_LIFT_M, delta=1e-3)
+
+    def test_motorway_and_rural_bridges_have_none(self):
+        f = features([[(-200, 0), (200, 0)]], ["motorway"], flags=[(0, "is_bridge", 0.4, 0.6)], ids=["r0"])
+        self.assertIsNone(roads.deck_walks(f, 0, roads.road_specs(f, urban)))
+        f = features([[(-200, 0), (200, 0)]], ["residential"], flags=[(0, "is_bridge", 0.4, 0.6)], ids=["r0"])
+        self.assertIsNone(roads.deck_walks(f, 0, roads.road_specs(f)), "rural: no sidewalks on the ground either")
+
+    def test_a_road_all_bridge_takes_the_sidewalks_of_the_street_going_on(self):
+        f = features([[(-200, 0), (0, 0)], [(0, 0), (60, 0)]], ["residential"] * 2, flags=[(1, "is_bridge", 0.0, 1.0)],
+                     ids=["r0", "r1"])
+        specs = roads.road_specs(f, urban)
+        self.assertIsNone(specs[1], "(all bridge: no ground spec)")
+        walk = roads.deck_walks(f, 1, specs)
+        self.assertIsNotNone(walk)
+        self.assertEqual(set(walk[1]), {1, -1})
+
+    def test_one_side_offsets_the_deck(self):
+        spec = roads.Spec(width=10.0, kind="paved", urban=False, cls="trunk", oneway=True)
+        self.assertEqual(roads._deck_frame(spec, (2.0, (-1,))), (12.0, -1.0))
+        self.assertEqual(roads._deck_frame(spec, None), (10.0, 0.0))
+
 if __name__ == "__main__":
     unittest.main()

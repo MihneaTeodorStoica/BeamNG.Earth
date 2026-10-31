@@ -6587,7 +6587,7 @@ def _tunnel_chunks(tunnels, cells, exact, terrain_paint=True):
     return out
 
 
-def _bridge_chunks(frame, bseen, elev, exact, bridges=None, cells=None):
+def _bridge_chunks(frame, bseen, elev, exact, bridges=None, cells=None, walks=None):
     """The chunks of the bridges crossing the tile box `exact` (deck surfaces flagged "deck", their
     centre / edge lines; every bridge chunk "fixed": its z is the deck's, not the ground's). Deck
     heights: from `bridges` (BridgeProfiles: whole chains, shared by every tile), else from the
@@ -6596,7 +6596,7 @@ def _bridge_chunks(frame, bseen, elev, exact, bridges=None, cells=None):
         got = [(fid, spec, np.c_[xy, z], lon) for fid, spec, xy, z, lon in bridges.parts(cells, exact)
                if np.isfinite(z).all()]
         dd = getattr(bridges, "depth_of", None)
-        return _deck_chunks(got, exact, bridges._ground, {d[0]: dd(d[0]) for d in got} if dd else None)
+        return _deck_chunks(got, exact, bridges._ground, {d[0]: dd(d[0]) for d in got} if dd else None, walks)
     if not bseen:
         return []
     parts = []                                  # (fid, spec, xy (k, 2), lon)
@@ -6631,7 +6631,7 @@ def _bridge_chunks(frame, bseen, elev, exact, bridges=None, cells=None):
             import grading
             z = np.maximum(_smooth_pinned(z, DECK_STEP, grading.SIGMA_M), g)
         decks.append((fid, spec, np.c_[xy, z], lon))
-    return _deck_chunks(decks, exact, ground)
+    return _deck_chunks(decks, exact, ground, walks=walks)
 
 
 DECK_CONTEXT_M = 24.0   # m around a tile its bridges' decks are passed as context (roadmesh.deck: whether an edge has
@@ -6798,11 +6798,66 @@ def pad_inside(pads, xy, shrink=0.3):
     return out
 
 
-def _deck_chunks(decks, exact, ground_fn=None, depths=None):
+# Sidewalks on bridges (the user, 2026-10-31, East Pratt Street over the Jones Falls: "check if this bridge has
+# sidewalks"; its real deck has one each side, ours stopped the street's at both ends): a deck whose road has sidewalks
+# on the ground (its own ground part, else a road going on from its end: deck_walks) carries them, the deck slab,
+# parapets and collision that much wider, a concrete strip flush on the deck (a raised one would need its own collider
+# across the car's path) beside the carriageway.
+DECK_WALK = {"m": "sidewalk_concrete", "tl": 6.0, "p": 16}
+DECK_WALK_LIFT_M = 0.03         # m the strip is drawn over the deck (no z fighting with its asphalt)
+
+
+def _deck_frame(spec, walk):
+    """(deck width m, its centreline's offset m to the left) of a deck with walk ((m, sides) or None): the carriageway
+    and the sidewalks either side (one side: the deck off-centre that way)."""
+    if not walk:
+        return float(spec.width), 0.0
+    wm, sides = walk
+    return float(spec.width) + wm * len(sides), wm / 2 * float(sum(sides))
+
+
+def deck_walks(feats, i, ground_specs, left_hand=False):
+    """(sidewalk width m, sides) a deck of feature i carries, or None: its own ground part's (ground_specs[i]: the
+    tile's road_specs, land cover and all) where that has sidewalks, else those of a road of its class going on from
+    one of its ends (a road all bridge has no ground spec), on the side of the deck they are on. Pure."""
+    gs = ground_specs[i]
+    if gs is not None:
+        return (float(gs.walk), tuple(walk_sides(gs, left_hand))) if has_sidewalks(gs) else None
+    bs = bridge_specs(feats)[i]
+    if bs is None:
+        return None
+    a = feats.coord_off[feats.ring_off[feats.part_off[i]]]
+    b = feats.coord_off[feats.ring_off[feats.part_off[i + 1]]]
+    if b - a < 2:
+        return None
+    mine = {(round(float(feats.lonlat[k, 0]), 6), round(float(feats.lonlat[k, 1]), 6)): e
+            for e, k in ((0, a), (1, b - 1))}
+    best = None
+    for j, sp in enumerate(ground_specs):
+        if j == i or sp is None or sp.cls != bs.cls or not has_sidewalks(sp):
+            continue
+        ja = feats.coord_off[feats.ring_off[feats.part_off[j]]]
+        jb = feats.coord_off[feats.ring_off[feats.part_off[j + 1]]]
+        if jb - ja < 2:
+            continue
+        for ej, k in ((0, ja), (1, jb - 1)):
+            e = mine.get((round(float(feats.lonlat[k, 0]), 6), round(float(feats.lonlat[k, 1]), 6)))
+            if e is None:
+                continue
+            sides = tuple(walk_sides(sp, left_hand))
+            if e == ej:                         # (end to end or start to start: they run opposite ways)
+                sides = tuple(-x for x in sides)
+            if best is None or sp.walk < best[0]:
+                best = (float(sp.walk), sides)
+    return best
+
+
+def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None):
     """Deck + line chunks of bridge parts [(fid, spec, pts (k, 3), lon)] clipped to the box `exact`, and their decks
     within DECK_CONTEXT_M of it as "ctx" chunks (not drawn: build_tile's caller hands them to roadmesh.deck).
     ground_fn(xy) -> heights: a part's ends on the ground are its abutments (each deck chunk's "abut" points: the
-    parapets ramp down there)."""
+    parapets ramp down there). walks: {fid: (sidewalk m, sides)} of the decks that carry sidewalks (deck_walks)."""
+    walks = walks or {}
     out = []
     abut = {}
     ends = [(i, e, np.asarray(pts, np.float64)[e, :2]) for i, (_, _, pts, _) in enumerate(decks) if len(pts) >= 2
@@ -6819,19 +6874,27 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None):
     x0, y0, x1, y1 = exact
     wide = (x0 - DECK_CONTEXT_M, y0 - DECK_CONTEXT_M, x1 + DECK_CONTEXT_M, y1 + DECK_CONTEXT_M)
     for fid, spec, pts, lon in decks:
-        for piece in clip_polyline(pts, *wide):
+        dw, dc = _deck_frame(spec, walks.get(fid))
+        for piece in clip_polyline(offset_polyline(pts, dc) if dc else pts, *wide):
             for c in split(densify(simplify(piece, ztol=SIMPLIFY_Z_M))):
                 if len(c) >= 2:
-                    ch = _chunk({**_deck_look(spec), "deck": True}, spec.width, c)
+                    ch = _chunk({**_deck_look(spec), "deck": True}, dw, c)
                     ch.update(fixed=True, deck=True, fid=fid, ctx=True)
                     if depths and fid in depths:
                         ch["dd"] = round(float(depths[fid]), 3)
                     out.append(ch)
     for fid, spec, pts, lon in decks:
-        lines = [({**_deck_look(spec), "deck": True}, spec.width, pts)]
+        dw, dc = _deck_frame(spec, walks.get(fid))
+        lines = [({**_deck_look(spec), "deck": True}, dw, offset_polyline(pts, dc) if dc else pts)]
         for look, w, line in extras(spec, pts, lon):
             if look["m"] not in (SIDEWALK["m"], GUTTER["m"], EDGE_DECAL["m"]):     # (no ground beside a deck)
                 lines.append((look, w, line))
+        if walks.get(fid):                      # its sidewalks, flush on the deck beside the carriageway
+            wm, sides = walks[fid]
+            for side in sides:
+                line = offset_polyline(pts, side * (spec.width / 2 + wm / 2))
+                line[:, 2] += DECK_WALK_LIFT_M
+                lines.append((DECK_WALK, wm, line))
         for look, w, line in lines:
             for piece in clip_polyline(line, *exact):
                 for c in split(densify(simplify(piece, ztol=SIMPLIFY_Z_M))):
@@ -7045,7 +7108,13 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
                     if len(c) >= 2:
                         chunks.append(_chunk(look, lw, c))
     decks_near = []                             # (retaining_walls: none under a bridge)
-    for ch in _bridge_chunks(frame, bseen, elev, (x0, y0, x1, y1), bridges, cells):
+    deck_walk = {}                              # the bridges that carry sidewalks (deck_walks)
+    for fid in bseen:
+        bf, bi, _ = bseen[fid]
+        dwk = deck_walks(bf, bi, road_specs(bf, urban_fn, widths, left_hand), left_hand)
+        if dwk:
+            deck_walk[fid] = dwk
+    for ch in _bridge_chunks(frame, bseen, elev, (x0, y0, x1, y1), bridges, cells, deck_walk):
         if ch.get("deck"):
             decks_near.append(ch)
         if not ch.get("ctx"):
