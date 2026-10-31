@@ -346,9 +346,27 @@ pub fn lane_shifts<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
         };
         // geometry's left at the node end, as +1 / -1 against the travel direction
         let geom_sign = |i: usize| if at[[i, 0]] > 0.0 { 1.0 } else { -1.0 };
+        // the offset (m, travel-left of `di`) from the node of road r's point `dist` m along it from its end at the
+        // node, and every (arc length, that offset) on the way
+        let lateral = |r: usize, r_at_tail: bool, di: [f64; 2]| -> Vec<(f64, f64)> {
+            let (a, b) = (off[r] as usize, off[r + 1] as usize);
+            let from_start = r_at_tail == (at[[r, 0]] > 0.0);
+            let idx = |k: usize| if from_start { a + k } else { b - 1 - k };
+            let (x0, y0) = (ll[[idx(0), 0]], ll[[idx(0), 1]]);
+            let (mut s, mut px, mut py_) = (0.0, 0.0, 0.0);
+            let mut out = vec![(0.0, 0.0)];
+            for k in 1..(b - a) {
+                let (x, y) = ((ll[[idx(k), 0]] - x0) * mx, (ll[[idx(k), 1]] - y0) * my);
+                s += (x - px).hypot(y - py_);
+                px = x;
+                py_ = y;
+                out.push((s, di[0] * y - di[1] * x));
+            }
+            out
+        };
         for i in 0..n {
-            if !ok[i] || at[[i, 2]] > 0.5 {
-                continue;                       // (ramps keep their lines)
+            if !ok[i] {
+                continue;
             }
             for at_tail in [true, false] {
                 let (t, h) = node[i];
@@ -363,8 +381,53 @@ pub fn lane_shifts<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
                 let mains: Vec<usize> = others.iter().copied()
                     .filter(|&j| at[[j, 2]] < 0.5 && at[[j, 3]] == at[[i, 3]]).collect();
                 let ramps: Vec<usize> = others.iter().copied().filter(|&j| at[[j, 2]] > 0.5).collect();
-                if mains.len() != 1 || ramps.is_empty() || mains.len() + ramps.len() != others.len() {
+                if mains.len() != 1 {
+                    // no one road going on (two ramps joining into a new road, a road splitting into two): the others
+                    // side by side across i, outermost edges flush with i's, each easing back to its own line where
+                    // its geometry has moved that far aside (2026-10-31, I-95 by the Middle Branch: two ramps
+                    // merging, both centred on the new road's line, its corners 2.6 m past either)
+                    let (Some(di), _) = travel(i, at_tail) else { continue };
+                    let wi = at[[i, 1]];
+                    // each other road: its width, its geometry's offsets aside and where it lies across i (its offset
+                    // 60 m on, or at its end); all near i's direction
+                    let mut lay: Vec<(f64, usize, f64, Vec<(f64, f64)>)> = Vec::new();
+                    let mut fits = true;
+                    for &r in others.iter() {
+                        let (Some(dr), _) = travel(r, !at_tail) else { fits = false; break };
+                        if di[0] * dr[0] + di[1] * dr[1] < (40.0f64).to_radians().cos() {
+                            fits = false;       // (a road meeting at an angle: a junction, not a merge / split)
+                            break;
+                        }
+                        let prof = lateral(r, !at_tail, di);
+                        let k = prof.iter().position(|q| q.0 >= 60.0).unwrap_or(prof.len() - 1);
+                        lay.push((prof[k].1, r, at[[r, 1]], prof));
+                    }
+                    if !fits || lay.len() < 2 || wi <= 0.0 {
+                        continue;
+                    }
+                    lay.sort_by(|p, q| q.0.partial_cmp(&p.0).unwrap_or(std::cmp::Ordering::Equal));    // left first
+                    let total: f64 = lay.iter().map(|q| q.2).sum();
+                    let mut before = 0.0;
+                    for (_, r, w, prof) in lay.iter() {
+                        let frac = if total - w > 1e-6 { before / (total - w) } else { 0.5 };
+                        before += w;
+                        // its centre across i (+ left of i's travel): flush left for the first, right for the last
+                        let c = wi / 2.0 - w / 2.0 - (wi - w) * frac;
+                        if c.abs() < min_shift {
+                            continue;
+                        }
+                        // eased away where its own line has moved that far aside, at most max_l / share of it
+                        let reach = prof.iter().find(|q| q.1 * c.signum() >= c.abs()).map(|q| q.0).unwrap_or(max_l);
+                        let length = prof.last().map(|q| q.0).unwrap_or(0.0);
+                        let span = reach.clamp(min_l, max_l).min(share * length);
+                        let shift = c * geom_sign(*r);
+                        let v = if (!at_tail) == (at[[*r, 0]] > 0.0) { off[*r] as usize } else { off[*r + 1] as usize - 1 };
+                        rows.push([*r as f64, ll[[v, 0]], ll[[v, 1]], shift, span]);
+                    }
                     continue;
+                }
+                if at[[i, 2]] > 0.5 || ramps.is_empty() || mains.len() + ramps.len() != others.len() {
+                    continue;                   // (ramps keep their lines)
                 }
                 let j = mains[0];
                 let dw = at[[i, 1]] - at[[j, 1]];

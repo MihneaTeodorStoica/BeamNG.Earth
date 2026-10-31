@@ -276,6 +276,34 @@ class LaneShiftScenarios(unittest.TestCase):
         for y in before:
             self.assertTrue(any(abs(y - y2) < 0.15 for y2 in after), f"the line at {y} m goes on: {after}")
 
+    def test_two_ramps_merging_lie_side_by_side(self):
+        # two ramps joining into a new road, none going on (I-95 by the Middle Branch: both centred on its line, its
+        # corners 2.6 m past either): each across the new road, the outer edges flush with its, easing away
+        f = features([[(-300, 60), (-150, 6), (0, 0)], [(-300, -60), (-150, -6), (0, 0)], [(0, 0), (300, 0)]],
+                     ["motorway"] * 3, ids=["left", "right", "on"])
+        f.rules["oneway"] = rules([(k, 1.0) for k in range(3)], "float")
+        f.rules["subclass"] = rules([(0, "link"), (1, "link")])
+        specs = roads.road_specs(f)
+        wl, wr, wt = specs[0].width, specs[1].width, specs[2].width
+        sh = roads.lane_shifts(f)
+        self.assertEqual(sh[2], (), "the new road keeps its line")
+        (lo_l, la_l, s_l, span_l), = sh[0]
+        (lo_r, la_r, s_r, span_r), = sh[1]
+        self.assertAlmostEqual(s_l, wt / 2 - wl / 2, delta=0.01, msg="the left ramp's left edge on the new road's")
+        self.assertAlmostEqual(s_r, -(wt / 2 - wr / 2), delta=0.01, msg="the right ramp's right edge on the new road's")
+        la, lo, _ = FRAME.enu_to_geodetic(np.array([0.0, -40.0, -400.0]), np.zeros(3), 0.0)
+        got = roads.shift_at(sh[0], lo, la)
+        self.assertAlmostEqual(float(got[0]), s_l, delta=0.01)
+        self.assertLess(abs(float(got[2])), 1e-9, "eased away far up the ramp")
+        self.assertLessEqual(span_l, roads.SHIFT_M[1])
+
+    def test_roads_meeting_at_an_angle_keep_their_lines(self):
+        # a one-way street joining another at a right angle: a junction, not a merge
+        f = features([[(-300, 0), (0, 0)], [(0, -300), (0, 0)], [(0, 0), (300, 0)]], ["primary"] * 3,
+                     ids=["a", "b", "on"])
+        f.rules["oneway"] = rules([(k, 1.0) for k in range(3)], "float")
+        self.assertEqual(roads.lane_shifts(f), [(), (), ()])
+
 
 class GoreNoseScenarios(unittest.TestCase):
     """Where a ramp's deck parts from its road's, their joined slab narrows to a point and the parapets start there

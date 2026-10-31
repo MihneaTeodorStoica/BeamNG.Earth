@@ -71,6 +71,27 @@ print(f"{len(decks)} deck chunks, {len(ends) // 2} with ribbons; {len(steps)} ed
 for s in steps[:30]:
     print("  step", s[0], "m at", s[1], s[2], "widths", s[3], s[4], "parts", s[5], s[6])
 
+# Forks (a trunk end meeting two or more ends running on: a split or a merge): the trunk's outer edges against the
+# outermost edges of its branches (leftmost branch's left, rightmost's right), a notch or a lip where they differ
+forks = []
+for i, (p, d, l, r, c) in enumerate(ends):
+    lat = np.array([-d[1], d[0]])
+    jl, jr = float(np.dot(l - p, lat)), float(np.dot(r - p, lat))
+    on = [(float(np.dot(r2 - p, lat)), float(np.dot(l2 - p, lat)), c2) for q, e, l2, r2, c2 in ends
+          if c2 is not c and np.hypot(*(p - q)) <= 1.5 and float(np.dot(d, e)) < -np.cos(np.radians(40.0))]
+    if len(on) < 2:
+        continue
+    kl, kr = max(o[0] for o in on), min(o[1] for o in on)
+    step = max(abs(jl - kl), abs(jr - kr))
+    if step > 0.25:
+        la, lo, _ = frame.enu_to_geodetic(np.array([p[0]]), np.array([p[1]]), 0.0)
+        forks.append((round(step, 2), round(float(la[0]), 6), round(float(lo[0]), 6), round(jl - kl, 2),
+                      round(jr - kr, 2), c.get("w"), [o[2].get("w") for o in on]))
+forks.sort(key=lambda f: -f[0])
+print(f"{len(forks)} fork outer-edge steps over 0.25 m")
+for f in forks[:20]:
+    print("  fork", f[0], "m at", f[1], f[2], "left/right", f[3], f[4], "trunk w", f[5], "branches", f[6])
+
 # The slab's own edges (roadmesh.deck: past the road's edge to a median's middle, a gore nose, an open gap): teeth where
 # the slab's reach past the road jumps more than 1 m from one edge point to the next inside a chunk (the zigzag
 # "black teeth" of _fill_short's note; Old Keene Mill Road in Springfield, 2026-10-31)
