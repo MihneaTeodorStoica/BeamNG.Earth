@@ -381,5 +381,33 @@ class MedianScenarios(unittest.TestCase):
         np.testing.assert_allclose(a[0], [1.0, 0.0], atol=1e-9)
         self.assertTrue(((a * b).sum(1) < -0.5).all())
 
+
+class DeckTaperScenarios(unittest.TestCase):
+    """Two decks end to end at other widths both run to half way (a 24.0 m deck going on as a 20.4 m one stepped
+    1.8 m); the deck's ribbon follows its per-point widths ("ws")."""
+
+    def test_decks_meet_half_way(self):
+        f = chain([24.0, 20.0], classes=["motorway", "motorway"], bridged=[0, 1])
+        f.rules["oneway"] = rules([(0, 1.0), (1, 1.0)], "float")
+        tp = roads.deck_tapers(f)
+        self.assertTrue(tp[0] and tp[1], "both decks taper")
+        bs = roads.bridge_specs(f)
+        la, lo, _ = FRAME.enu_to_geodetic(np.array([0.0]), np.array([0.0]), 0.0)
+        for i in (0, 1):
+            w = roads.taper_widths(bs[i].width, tp[i], lo, la)
+            self.assertAlmostEqual(float(w[0]), (bs[0].width + bs[1].width) / 2, delta=0.05)
+
+    def test_ribbon_follows_its_widths(self):
+        import roadmesh
+        pts = np.c_[np.linspace(0, 40, 11), np.zeros(11), np.full(11, 10.0)]
+        c = {"m": "x", "w": 20.0, "tl": 10.0, "p": 20, "deck": True, "fixed": True, "n": pts.tolist(),
+             "ws": list(np.linspace(20.0, 24.0, 11))}
+        (left, right, v, m, layer, z), = roadmesh.ribbons([c])
+        w = np.hypot(*(left - right).T)
+        self.assertAlmostEqual(float(w[0]), 20.0, delta=0.05)
+        self.assertAlmostEqual(float(w[-1]), 24.0, delta=0.05)
+        b = {"m": "x", "w": 3.0, "tl": 10.0, "p": 20, "n": pts.tolist()}       # (and a plain chunk beside it)
+        self.assertEqual(len(roadmesh.ribbons([c, b])), 2)
+
 if __name__ == "__main__":
     unittest.main()
