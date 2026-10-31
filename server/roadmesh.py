@@ -646,11 +646,11 @@ def deck(chunks, origin, piers=(), context=(), beams=(), ground=(), parapets=Non
         lat = left - right
         u = lat / np.maximum(np.hypot(lat[:, 0], lat[:, 1]), 1e-9)[:, None]     # unit left
         wide = 0.0 if c.get("tunnel") else PARAPET_W
-        gl, gr = medians[n]
-        covered[n] = (covered[n][0] | (gl > 0), covered[n][1] | (gr > 0))
-        # the slab's edges, past the road's (to the middle of a median beside another deck)
-        el = left + u * np.maximum(wide, gl / 2 + 0.05)[:, None]
-        er = right - u * np.maximum(wide, gr / 2 + 0.05)[:, None]
+        (xl, cl), (xr, cr_) = _noses(medians[n][0]), _noses(medians[n][1])
+        covered[n] = (covered[n][0] | cl, covered[n][1] | cr_)
+        # the slab's edges, past the road's (to the middle of a median beside another deck; to a point at a gore nose)
+        el = left + u * np.maximum(wide, xl)[:, None]
+        er = right - u * np.maximum(wide, xr)[:, None]
         L = np.c_[el, z] - origin
         R = np.c_[er, z] - origin
         # (a chunk's "dd": its bridge's slab and girders, roads.deck_depth of its span, split 1.2 : 1.0 as the full deck)
@@ -845,6 +845,43 @@ def _ground_carriageways(chunks):
     return out
 
 
+MEDIAN_NOSE_M = 3.0     # m of gap before MEDIAN_JOIN_M over which a diverging pair's joined slab narrows to a point
+NOSE_LOOK_PTS = 5       # ... where the gap widens toward the run's end by NOSE_WIDEN_M over this many points
+NOSE_WIDEN_M = 0.5
+
+
+def _noses(g):
+    """(slab extension m, covered) per edge point from its median gap g (_median_gaps): to the median's middle and no
+    parapet, as before, except where the gap widens toward the end of its run past MEDIAN_JOIN_M - MEDIAN_NOSE_M (an
+    exit or entrance ramp parting from its road's deck): there the extension narrows to nothing and the parapets follow
+    it, the two decks' meeting at a point (a gore nose; the user, 2026-10-31, an I-95 exit by the Middle Branch: the
+    slab ended square 6 m across and both walls started there in a step). Pure."""
+    g = np.asarray(g, np.float64)
+    ext = np.where(g > 0, g / 2 + 0.05, 0.0)
+    cov = g > 0
+    k = len(g)
+    i = 0
+    while i < k:
+        if g[i] <= 0:
+            i += 1
+            continue
+        j = i
+        while j + 1 < k and g[j + 1] > 0:
+            j += 1
+        for end, inward in ((j, -1), (i, 1)):
+            back = g[min(max(end + inward * NOSE_LOOK_PTS, i), j)]
+            if g[end] <= MEDIAN_JOIN_M - MEDIAN_NOSE_M or g[end] - back < NOSE_WIDEN_M:
+                continue
+            q = end
+            while i <= q <= j and g[q] > MEDIAN_JOIN_M - MEDIAN_NOSE_M:
+                f = min(max((MEDIAN_JOIN_M - g[q]) / MEDIAN_NOSE_M, 0.0), 1.0)
+                ext[q] *= f
+                cov[q] = False
+                q += inward
+        i = j + 1
+    return ext, cov
+
+
 def _median_gaps(rb, context=()):
     """Per deck ribbon (left, right) the gap (m) from each edge point to the nearest edge of another deck within
     MEDIAN_JOIN_M at about its height (PARAPET_COVER_DZ), else 0: a median between two carriageways' decks. rb and
@@ -978,13 +1015,13 @@ def parapet_runs(chunks, context=(), _rb=None, ground=(), pads=()):
         lat = left - right
         u = lat / np.maximum(np.hypot(lat[:, 0], lat[:, 1]), 1e-9)[:, None]
         wide = 0.0 if c.get("tunnel") else PARAPET_W
-        gl, gr = medians[n]
-        covered[n] = (covered[n][0] | (gl > 0), covered[n][1] | (gr > 0))
+        (xl, cl), (xr, cr_) = _noses(medians[n][0]), _noses(medians[n][1])
+        covered[n] = (covered[n][0] | cl, covered[n][1] | cr_)
         if len(pads):               # (none inside a junction pad: roads.deck_pads)
             import roads as _roads
             covered[n] = (covered[n][0] | _roads.pad_inside(pads, left), covered[n][1] | _roads.pad_inside(pads, right))
-        el = left + u * np.maximum(wide, gl / 2 + 0.05)[:, None]
-        er = right - u * np.maximum(wide, gr / 2 + 0.05)[:, None]
+        el = left + u * np.maximum(wide, xl)[:, None]
+        er = right - u * np.maximum(wide, xr)[:, None]
         k = len(z)
         for sgn, edge, inner, cov in ((1, el, left, covered[n][0]),
                                       (-1, er, right, covered[n][1])):

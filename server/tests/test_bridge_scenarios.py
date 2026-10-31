@@ -276,5 +276,27 @@ class LaneShiftScenarios(unittest.TestCase):
         for y in before:
             self.assertTrue(any(abs(y - y2) < 0.15 for y2 in after), f"the line at {y} m goes on: {after}")
 
+
+class GoreNoseScenarios(unittest.TestCase):
+    """Where a ramp's deck parts from its road's, their joined slab narrows to a point and the parapets start there
+    (an I-95 exit by the Middle Branch: the slab ended square 6 m across, both walls starting in a step)."""
+
+    def test_diverging_gap_ends_in_a_nose(self):
+        import roadmesh
+        g = np.r_[np.linspace(0.5, 5.9, 28), np.zeros(6)]          # the gap widening, then past MEDIAN_JOIN_M
+        ext, cov = roadmesh._noses(g)
+        start = roadmesh.MEDIAN_JOIN_M - roadmesh.MEDIAN_NOSE_M
+        self.assertTrue(cov[(g > 0) & (g <= start)].all(), "a narrow median: joined, no parapet, as before")
+        self.assertFalse(cov[(g > start)].any(), "the nose: parapets")
+        self.assertTrue(np.all(np.diff(ext[(g > start)]) <= 1e-9), "the slab narrowing toward the nose's tip")
+        self.assertLess(ext[27], 0.2, "to (almost) nothing where the decks part")
+
+    def test_steady_median_stays_joined(self):
+        import roadmesh
+        g = np.r_[np.full(30, 4.5), np.zeros(4)]                   # a divided road's decks 4.5 m apart: no widening
+        ext, cov = roadmesh._noses(g)
+        self.assertTrue(cov[:30].all())
+        np.testing.assert_allclose(ext[:30], 4.5 / 2 + 0.05)
+
 if __name__ == "__main__":
     unittest.main()
