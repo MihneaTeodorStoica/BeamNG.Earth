@@ -366,6 +366,48 @@ class RampTieScenarios(unittest.TestCase):
         g = np.abs(np.diff(rz)) / 5.0
         self.assertLessEqual(float(g.max()), 0.0513 + roads.TIE_EASE_GRADE * 2, "no step on the way down")
 
+    def test_joint_beside_the_road_keeps_its_height(self):
+        # the ramp's far end a joint with the next part (which goes on at its own height): never pulled to the road's
+        # (by I-395 in Baltimore: held to its joint, a 6.9 m step to the part going on from it)
+        xs = np.arange(0.0, 191.0, 5.0)
+        main = np.c_[xs, np.zeros_like(xs)]
+        ramp = np.c_[xs, np.full(len(xs), -13.0)]
+        nxt = np.c_[np.arange(190.0, 300.0, 5.0), np.full(22, -13.0)]
+        main_z = np.full(len(xs), 15.7)
+        ramp_z = np.interp(xs, [0.0, 110.0, 190.0], [15.7, 15.7, 11.6])
+        mspec = roads.Spec(width=16.0, kind="paved", urban=False, cls="motorway", oneway=True)
+        rspec = roads.Spec(width=8.0, kind="paved", urban=False, cls="motorway", oneway=True, link=True)
+        _, rz, _ = roads._tie_beside([main, ramp, nxt], [main_z, ramp_z, np.full(22, 11.6)], [mspec, rspec, rspec])
+        self.assertAlmostEqual(float(rz[-1]), 11.6, places=6, msg="its joint at its own height")
+
+    def test_measured_ramp_kept_a_level_apart(self):
+        # a ramp whose heights the lidar measured: held at its road's only within TIE_MEASURED_M
+        xs = np.arange(0.0, 301.0, 5.0)
+        main = np.c_[xs, np.zeros_like(xs)]
+        ramp = np.c_[xs, -0.08 * xs]
+        main_z = np.full(len(xs), 12.0)
+        ramp_z = np.full(len(xs), 10.0)                      # measured 2 m under it the whole way
+        mspec = roads.Spec(width=15.0, kind="paved", urban=False, cls="motorway", oneway=True)
+        rspec = roads.Spec(width=8.0, kind="paved", urban=False, cls="motorway", oneway=True, link=True)
+        _, rz = roads._tie_beside([main, ramp], [main_z, ramp_z], [mspec, rspec], [False, True])
+        np.testing.assert_allclose(rz, ramp_z, err_msg="the lidar's heights stand")
+        _, rz = roads._tie_beside([main, ramp], [main_z, ramp_z + 1.6], [mspec, rspec], [False, True])
+        self.assertAlmostEqual(float(rz[0]), 12.0, places=6, msg="a small gap at the fork still closed")
+
+
+class EndJoinScenarios(unittest.TestCase):
+    """Ends within 0.5 m of a point already in a node join it (four ramps' ends at a Springfield junction, each within
+    0.5 m of a neighbour, made two nodes: one ramp an abutment 9 m under the others)."""
+
+    def test_chain_of_near_ends_is_one_node(self):
+        nk = roads._EndJoin()
+        pts = [(-0.36, 0.181), (-0.035, -0.022), (-0.035, -0.022), (-0.188, -0.297)]
+        self.assertEqual(len({nk(np.array(p)) for p in pts}), 1)
+
+    def test_nodes_numbered_as_made(self):
+        nk = roads._EndJoin()
+        self.assertEqual([nk(np.array(p)) for p in [(0, 0), (5, 0), (0.2, 0), (10, 0)]], [0, 1, 0, 2])
+
 
 class ForkPadScenarios(unittest.TestCase):
     """A ramp's fork from its motorway gets a pad only to the decks' edges, its railing where theirs stop (the full pad

@@ -253,6 +253,16 @@ class ParapetCoverTest(unittest.TestCase):
         self.assertFalse(cl.any(), "the wider deck's left edge past the ramp's end")
         self.assertFalse(cl2.any())
 
+    def test_ground_road_ending_on_a_deck_covers_it(self):
+        # a driveway meeting a deck's side at grade ends on its edge: no parapet across it (rampcheck.py, the JFX)
+        deck = self.ribbon(0, 40, 0.0, 6.5, "deck")
+        x = np.arange(0.0, 20.1, 2.0)
+        mid = np.c_[np.full(len(x), 20.0), 6.5 + x]                    # its end on the deck's left edge
+        drive = ((mid + [-2.0, 0], mid + [2.0, 0], x / 10, "m", "base", np.full(len(x), 50.0)), {"fid": "drive"})
+        (cl, _), = roadmesh._parapet_cover([deck], [drive])
+        k = int(np.argmin(np.abs(deck[0][0][:, 0] - 20.0)))
+        self.assertTrue(cl[k], "covered where the driveway meets it")
+
     def test_side_by_side_still_covered(self):
         a, b = self.ribbon(0, 40, 0.0, 4.0, "a"), self.ribbon(0, 40, 7.0, 4.0, "b")    # overlapping by 1 m
         (cl, cr), (cl2, cr2) = roadmesh._parapet_cover([a, b])

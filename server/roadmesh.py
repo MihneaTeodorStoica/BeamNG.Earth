@@ -1070,7 +1070,9 @@ def _parapet_cover(rb, context=()):
         B.append(np.c_[mid[1:], z[1:]])
         HW.append(np.full(len(z) - 1, hw))
         OS.append(np.full(len(z) - 1, oid))
-        EN.append(square(len(z)))
+        # (a ground road's end is no deck's: one meeting a deck's side at grade ends on its edge, the parapet open
+        # there; square, they stood across a driveway at the JFX and one in Springfield, rampcheck.py)
+        EN.append(square(len(z)) if c.get("deck") else np.zeros(max(len(z) - 1, 0), np.int64))
     P_, O_ = np.concatenate(pts), np.concatenate(own).astype(np.int64)
     A_, B_, H_, S_ = np.concatenate(A), np.concatenate(B), np.concatenate(HW), np.concatenate(OS).astype(np.int64)
     fast.require(122, "deck_edges_covered")

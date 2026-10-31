@@ -262,18 +262,55 @@ def _rule_value(table, i):
     return None if j < 0 else table.value[j]
 
 
-def level_ranges(feats, i):
+def home_copy(feats, i):
+    """(feats', j) of feature i's copy in its home cell (the cell of its first point, among the eight round feats'
+    cell: mapdata's _bnge_neighbours), None where that is this cell or not at hand. A road's copies in the cells it
+    crosses each see other roads round them: what depends on those (its lanes, its bridge ranges) is taken from one."""
+    me = feats.__dict__.get("_bnge_cell")
+    hook = feats.__dict__.get("_bnge_neighbours")
+    if me is None or hook is None:
+        return None
+    import mapcells
+    a = feats.coord_off[feats.ring_off[feats.part_off[i]]]
+    home = str(mapcells.cell_of(float(feats.lonlat[a, 1]), float(feats.lonlat[a, 0])))
+    if home == me[0]:
+        return None
+    try:
+        near = {f.__dict__["_bnge_cell"][0]: f for f in hook() if f is not None and f.__dict__.get("_bnge_cell")}
+    except Exception as e:              # (this cell's own)
+        log.debug("home copy: neighbours: %s: %s", type(e).__name__, e)
+        return None
+    other = near.get(home)
+    if other is None:
+        return None
+    pos = other.__dict__.get("_id_pos")
+    if pos is None:
+        pos = other.__dict__["_id_pos"] = {fid: j for j, fid in enumerate(other.ids.tolist())}
+    j = pos.get(feats.ids[i])
+    return None if j is None else (other, j)
+
+
+def level_ranges(feats, i, _home=True):
     """The off-ground ranges of feature i as sorted (start, end, "bridge" | "tunnel") fractions of its
     length, from its flags (is_bridge / is_tunnel) and level (> 0 bridge, < 0 tunnel) rules. Overture
     puts most bridges on a range of a longer segment (2026-10-11: a street with a few metres of bridge
-    was taken whole as a bridge and dropped). Pure. A cell's are made all at once and shared (cell_facts)."""
+    was taken whole as a bridge and dropped). Pure. A cell's are made all at once and shared (cell_facts).
+    Its home cell's copy's (home_copy): lengthened over the roads crossing under it and joined over the lidar's
+    elevated stretches, the copy in each cell saw other roads (a ramp by I-395 in Baltimore: one deck from 9.5 % in
+    one cell, two with a ground gap at 14-16 % in the next, both drawn, one 8 m under the other)."""
+    if _home:
+        h = home_copy(feats, i)
+        if h is not None:
+            return level_ranges(h[0], h[1], _home=False)
     memo = feats.__dict__.setdefault("_level_ranges", {})
     got = memo.get(i)
     if got is None:
         _cell_ranges(feats)
         got = memo.get(i)
         if got is None:
-            got = memo[i] = _lidar_gaps(feats, i, rule_level_ranges(feats, i))
+            # (the lidar's elevated stretches gap-filled again: one ending 12 m short of the map's deck left a ground
+            # piece between them mid-ramp, by I-395 in Baltimore)
+            got = memo[i] = _deck_gaps(feats, i, _lidar_gaps(feats, i, rule_level_ranges(feats, i)))
     if feats.__dict__.get("_lidar_rule"):
         import revisit                      # (the rule for want of the lidar: nothing built on it is kept)
         revisit.fault()
@@ -365,7 +402,7 @@ def _cell_ranges(feats, load_only=False):
     import revisit
     f0 = revisit.faults()
     raw = [raw_level_ranges(feats, i) for i in range(len(feats))]
-    lvl = [level_ranges(feats, i) for i in range(len(feats))]
+    lvl = [level_ranges(feats, i, _home=False) for i in range(len(feats))]
     st["_ranges_state"] = "done"
     if revisit.faults() == f0:
         _facts_store(feats, "ranges", None, {"raw": [[[float(a), float(b), k] for a, b, k in r] for r in raw],
@@ -2168,13 +2205,16 @@ def _bridge_specs(feats, want="bridge"):
 
 
 class _EndJoin:
-    """Line end points joined into nodes when within tol m of each other (the first point seen names the node; a later
-    one joins the nearest node within tol). Rounding to a 0.5 m grid split ends a few cm apart either side of a grid
-    line and joined ends 0.68 m apart on a diagonal (from cody196's PR #368). A grid of tol cells, the 3 x 3 around a
-    point looked up: as cheap as the rounding. Deterministic for a given order."""
+    """Line end points joined into nodes when within tol m of a point already in one (the first point seen names the
+    node; a later one joins the node of its nearest point within tol, and is one of its points after). Rounding to a
+    0.5 m grid split ends a few cm apart either side of a grid line and joined ends 0.68 m apart on a diagonal (from
+    cody196's PR #368). Against the node's first point alone, four ramps' ends within 0.5 m of their neighbours at a
+    Springfield junction made two nodes: one ramp's end an abutment at the ground, 9 m under the others (2026-10-31,
+    rampcheck.py). A grid of tol cells, the 3 x 3 around a point looked up. Deterministic for a given order; nodes
+    numbered in the order they are made."""
 
     def __init__(self, tol=0.5):
-        self.tol, self.grid, self.pts = tol, {}, []
+        self.tol, self.grid, self.pts, self.node, self.n = tol, {}, [], [], 0
 
     def __call__(self, p):
         x, y = float(p[0]), float(p[1])
@@ -2188,10 +2228,17 @@ class _EndJoin:
                     if d < bd or (d == bd and best is not None and i < best):
                         best, bd = i, d
         if best is not None:
-            return best
+            nd = self.node[best]
+            if bd > 1e-12:                  # (a point of its node now: the next end within tol of it joins too)
+                self.pts.append((x, y))
+                self.node.append(nd)
+                self.grid.setdefault((gx, gy), []).append(len(self.pts) - 1)
+            return nd
         self.pts.append((x, y))
+        self.node.append(self.n)
         self.grid.setdefault((gx, gy), []).append(len(self.pts) - 1)
-        return len(self.pts) - 1
+        self.n += 1
+        return self.n - 1
 
 
 def _chain_graph(lines):
@@ -2307,7 +2354,12 @@ TIE_EASE_GRADE = 0.025          # rise over run of the easing from the tied heig
 TIE_EASE_MIN_M = 20.0           # ... over this at the least
 
 
-def _tie_beside(lines, zs, specs):
+TIE_MEASURED_M = 0.5        # m: a part whose heights a source measured (roadz: the lidar) is held at its road's
+                            # only this near it (the two measured apart at a fork), never a level apart: the tie had
+                            # pulled measured ramps by I-395 1.6 and 4.9 m off the lidar's
+
+
+def _tie_beside(lines, zs, specs, measured=None):
     """zs with each branch (a ramp, else the narrower part) that leaves or joins another part (its end on that part's
     deck) held at
     that part's height while their slabs are joined (TIE_*), eased into its own profile after. lines: (k, >= 2) per
@@ -2328,18 +2380,17 @@ def _tie_beside(lines, zs, specs):
 
     own = [z.copy() for z in zs]
 
-    def free(i, e):
-        """Whether end e of part i is an abutment: on no other part's end nor its deck (the road going on on the
-        ground from it)."""
+    def fixed(i, e, j):
+        """Whether end e of part i keeps its own height when i is held at part j's: an abutment (the road going on
+        on the ground from it) or a joint with another part (that part goes on at i's height there); only an end on
+        j's own deck and on nothing else follows j."""
         p = pts[i][e]
-        for j in range(n):
-            if j == i or len(pts[j]) < 2:
+        for k in range(n):
+            if k in (i, j) or len(pts[k]) < 2:
                 continue
-            if min(np.hypot(*(pts[j][0] - p)), np.hypot(*(pts[j][-1] - p))) <= 1.0:
-                return False
-            if project(j, p[None])[0] <= float(specs[j].width) / 2 + 1.0:
-                return False
-        return True
+            if min(np.hypot(*(pts[k][0] - p)), np.hypot(*(pts[k][-1] - p))) <= 1.0:
+                return True
+        return project(j, p[None])[0] > float(specs[j].width) / 2 + 1.0
 
     for i in range(n):
         if len(pts[i]) < 2:
@@ -2347,10 +2398,6 @@ def _tie_beside(lines, zs, specs):
         wi = float(specs[i].width)
         for e in (0, -1):
             p = pts[i][e]
-            # (its other end an abutment: held no nearer it than its ease back down takes, its own height there kept;
-            # a ramp beside its road the whole way from the fork to its abutment had been held at the road's height
-            # to its very start, 4.9 m over the ground road going on from it: MLK Boulevard by I-395, Baltimore)
-            far = free(i, -1 - e)
             best = None
             for j in range(n):
                 if j == i or len(pts[j]) < 2:
@@ -2374,6 +2421,11 @@ def _tie_beside(lines, zs, specs):
             if best is None:
                 continue
             _, j, wj = best
+            # (its other end an abutment or a joint: held no nearer it than its ease back to its own profile takes,
+            # its own height there kept. A ramp beside its road the whole way from the fork to its abutment had been
+            # held at the road's height to its very start, 4.9 m over the ground road going on from it (MLK
+            # Boulevard by I-395, Baltimore); another to its joint with the next part, a 6.9 m step there)
+            far = fixed(i, -1 - e, j)
             order = range(len(pts[i])) if e == 0 else range(len(pts[i]) - 1, -1, -1)
             s0 = arcs[i][0 if e == 0 else -1]
             sep, delta = None, 0.0
@@ -2383,7 +2435,8 @@ def _tie_beside(lines, zs, specs):
                 if d - (wi + wj) / 2 >= TIE_JOIN_M:
                     sep = k
                     break
-                if abs(zj - zs[i][k]) > 2.0 + abs(arcs[i][k] - s0) * 0.1:
+                if abs(zj - zs[i][k]) > (TIE_MEASURED_M if measured is not None and measured[i]
+                                         else 2.0 + abs(arcs[i][k] - s0) * 0.1):
                     sep = k                             # (another level: stacked, not side by side)
                     break
                 if far and abs(s_far - arcs[i][k]) < max(TIE_EASE_MIN_M, abs(zj - own[i][k]) / TIE_EASE_GRADE):
@@ -5080,6 +5133,7 @@ class BridgeProfiles:
                 obs[i] = None
         if all(o is None for o in obs):
             return zs
+        measured = self.__dict__.setdefault("_obs_tl", threading.local()).__dict__.setdefault("measured", set())
         target = {}
         for node in deg:
             if deg[node] == 1:
@@ -5116,6 +5170,7 @@ class BridgeProfiles:
                     # pulled a deck through the road under it (-1.8 m over I-95 at Springfield)
                     # (the ends as eased: the parts at a joint keep meeting at one height)
                     zz = np.r_[zz[0], np.maximum(zz, np.minimum(z, o))[1:-1], zz[-1]]
+                    measured.add(comp[k])
             out.append(zz)
         return out
 
@@ -5230,8 +5285,11 @@ class BridgeProfiles:
                         return got
             except Exception as ex:         # (solved here rather than not at all)
                 log.debug("chain %s from its owner: %s: %s", key, type(ex).__name__, ex)
+        tl = self.__dict__.setdefault("_obs_tl", threading.local())
+        tl.measured = set()
         zs = self._solve(comp, pool, ground)
-        zs = _tie_beside([pool[k][1] for k in comp], zs, [pool[k][0] for k in comp])     # (ramps beside their road)
+        zs = _tie_beside([pool[k][1] for k in comp], zs, [pool[k][0] for k in comp],     # (ramps beside their road)
+                         [k in tl.measured for k in comp])
         with self.lock:
             for k, z in zip(comp, zs):
                 spec, xy, lon = pool[k][:3]
