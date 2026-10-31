@@ -6921,6 +6921,8 @@ PAD_WALL_DROP_M = 1.0
 PAD_RIM_STEP_M = 1.0
 
 
+PAD_FORK_MARGIN_M = 0.45    # m: a fork's pad past its carriageways (roadmesh.PARAPET_W: the decks' own slab edges)
+PAD_FORK_OPEN_M = 0.1       # ... its rim open only where a carriageway crosses it (PAD_OPEN_M is past its sides)
 PAD_FORK_COS = 0.85         # two parts leaving a joint this close in direction run on side by side (a fork) ...
 PAD_FORK_STRAIGHT_COS = -0.9    # ... or this straight on from each other
 
@@ -6930,7 +6932,7 @@ def _fork(parts):
     goes straight on from each other or runs on side by side (PAD_FORK_*), none at an angle. A ramp parting from its
     motorway on a viaduct had a junction pad: a box wider than both decks, its railings standing out past their
     parapets (the user, 2026-10-31, I-95 by the Middle Branch: "right at the start of a split the shoulder lane and
-    barrier can bug out"); the joined slab and the gore nose (roadmesh) make that wedge. Pure."""
+    barrier can bug out"): its pad reaches only the decks' own edges (PAD_FORK_MARGIN_M). Pure."""
     d = []
     for line, _z, _h in parts:
         ln = np.asarray(line, np.float64)[:, :2]
@@ -6996,18 +6998,20 @@ def deck_pads(decks, ground_roads, box, ground_fn, own=True):
                 d.append(v / max(np.hypot(*v), 1e-9))
             if float(np.dot(d[0], d[1])) < PAD_STRAIGHT_COS:
                 continue                        # (a deck going on straight: its own end, an abutment, no corner)
-        if _fork(parts):
-            continue                            # (a ramp parting from or joining its road: no corner to cut)
+        # a ramp parting from or joining its road (no corner to cut): its joint paved just to the decks' edges (their
+        # slabs' PARAPET_W), the rim's railing the outer one where the parts' own stop, overlapping each other there
+        margin = PAD_FORK_MARGIN_M if _fork(parts) else PAD_MARGIN_M
         pts = np.ascontiguousarray(np.concatenate([p[0] for p in parts]), np.float64)
         zz = np.ascontiguousarray(np.concatenate([p[1] for p in parts]), np.float64)
         off = np.r_[0, np.cumsum([len(p[0]) for p in parts])].astype(np.int64)
         halves = np.array([p[2] for p in parts], np.float64)
-        hull = np.asarray(fast._ef.deck_pad(pts, zz, off, halves + PAD_MARGIN_M, PAD_REACH_M, PAD_STEP_M), np.float64)
+        hull = np.asarray(fast._ef.deck_pad(pts, zz, off, halves + margin, PAD_REACH_M, PAD_STEP_M), np.float64)
         if len(hull) < 3:
             continue
         zc = float(np.mean([p[1][0] for p in parts]))
         rim = np.asarray(fast._ef.deck_pad_rim(np.ascontiguousarray(hull), pts, off, halves, PAD_RIM_STEP_M,
-                                               PAD_OPEN_M), np.float64)
+                                               PAD_FORK_OPEN_M if margin == PAD_FORK_MARGIN_M else PAD_OPEN_M),
+                         np.float64)
         walls = []
         if len(rim):
             drop = rim[:, 2] - np.asarray(ground_fn(rim[:, :2]), np.float64)

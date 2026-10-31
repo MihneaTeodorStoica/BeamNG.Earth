@@ -325,10 +325,11 @@ class RampTieScenarios(unittest.TestCase):
 
 
 class ForkPadScenarios(unittest.TestCase):
-    """No junction pad at a ramp's fork from its motorway (a box wider than both decks, its railings standing out: I-95
-    by the Middle Branch); a street junction on a bridge keeps its pad (test_deckjoins)."""
+    """A ramp's fork from its motorway gets a pad only to the decks' edges, its railing where theirs stop (the full pad
+    was a box wider than both decks, its railings standing out: I-95 by the Middle Branch); a street junction on a
+    bridge keeps its wide pad (test_deckjoins)."""
 
-    def test_fork_has_no_pad(self):
+    def test_fork_pad_to_the_decks_edges(self):
         main_in = np.c_[np.linspace(-120.0, 0.0, 61), np.zeros(61)]
         main_out = np.c_[np.linspace(0.0, 120.0, 61), np.zeros(61)]
         ramp = np.c_[np.linspace(0.0, 120.0, 61), -0.12 * np.linspace(0.0, 120.0, 61)]
@@ -336,7 +337,15 @@ class ForkPadScenarios(unittest.TestCase):
         wide = roads.Spec(width=18.8, kind="paved", urban=False, cls="motorway", oneway=True)
         link = roads.Spec(width=8.0, kind="paved", urban=False, cls="motorway", oneway=True, link=True)
         decks = [("a", wide, main_in, z), ("b", wide, main_out, z), ("r", link, ramp, z)]
-        self.assertEqual(roads.deck_pads(decks, [], (-50, -50, 50, 50), lambda xy: np.zeros(len(xy))), [])
+        pads = roads.deck_pads(decks, [], (-50, -50, 50, 50), lambda xy: np.zeros(len(xy)))
+        self.assertEqual(len(pads), 1, "the joint paved (its railing where the parts' own stop)")
+        ring = np.asarray(pads[0][0], np.float64)
+        # no wider than the decks: within the carriageways' half widths + the fork margin of some part's line
+        lines = [(main_in, 9.4), (main_out, 9.4), (ramp, 4.0)]
+        for q in ring[:, :2]:
+            d = min(float(np.min(np.hypot(*(ln - q).T))) - h for ln, h in lines)
+            self.assertLess(d, roads.PAD_FORK_MARGIN_M + 0.6, f"pad point {q} past the decks' edges")
+        self.assertTrue(pads[0][2], "a railing round its rim over the drop")
 
 if __name__ == "__main__":
     unittest.main()
