@@ -2177,6 +2177,91 @@ def _end_ons(lines, halves, levels, ground_lines):
             for e in range(len(got)) if got[e, 0] >= 0]
 
 
+# A ramp's deck beside its road's at one height while their slabs are joined (roadmesh MEDIAN_JOIN_M: one slab, no
+# parapet between): solved apart, a ramp leaving at its own grade stood lower beside the main deck within metres of the
+# fork, a lip down the middle of the joined slab a car hung on (the user, 2026-10-31, an I-95 exit by the Middle
+# Branch: "see how the real bridge splits": one deck until the gore). Past the gore it eases into its own profile.
+TIE_JOIN_M = 6.0                # m of edge gap the slabs are joined within (roadmesh.MEDIAN_JOIN_M)
+TIE_EASE_GRADE = 0.025          # rise over run of the easing from the tied height into its own profile (with its own grade
+                                # on top: 7.5 % at most past a 5 % solve) ...
+TIE_EASE_MIN_M = 20.0           # ... over this at the least
+
+
+def _tie_beside(lines, zs, specs):
+    """zs with each branch (a ramp, else the narrower part) that leaves or joins another part (its end on that part's
+    deck) held at
+    that part's height while their slabs are joined (TIE_*), eased into its own profile after. lines: (k, >= 2) per
+    part, zs: heights per point, specs: their Specs. Pure."""
+    zs = [np.asarray(z, np.float64).copy() for z in zs]
+    pts = [np.asarray(ln, np.float64)[:, :2] for ln in lines]
+    n = len(pts)
+    arcs = [np.r_[0.0, np.cumsum(np.hypot(*np.diff(p, axis=0).T))] if len(p) >= 2 else np.zeros(len(p)) for p in pts]
+
+    def project(j, q):
+        """(distance, height) of q on part j's line."""
+        P, ab = pts[j][:-1], np.diff(pts[j], axis=0)
+        t = np.clip(((q - P) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-12), 0.0, 1.0)
+        near = P + t[:, None] * ab
+        d = np.hypot(*(q - near).T)
+        k = int(np.argmin(d))
+        return float(d[k]), float(zs[j][k] + t[k] * (zs[j][k + 1] - zs[j][k]))
+
+    for i in range(n):
+        if len(pts[i]) < 2:
+            continue
+        wi = float(specs[i].width)
+        for e in (0, -1):
+            p = pts[i][e]
+            best = None
+            for j in range(n):
+                if j == i or len(pts[j]) < 2:
+                    continue
+                wj = float(specs[j].width)
+                # (its end on the other's deck: at its end, or a few metres off it, where the map starts a ramp beside
+                # its road rather than on its joint: I-95 northbound by the Middle Branch, 2.2 m off, their slabs
+                # overlapping 0.2 m apart in height)
+                if project(j, p[None])[0] > wj / 2 + 1.0:
+                    continue
+                branch = (getattr(specs[i], "link", False) and not getattr(specs[j], "link", False)) or \
+                    (getattr(specs[i], "link", False) == getattr(specs[j], "link", False) and wi < wj - 0.5)
+                if not branch:
+                    continue
+                # the part it runs beside from the fork (of the parts at it: the nearest ~15 m along)
+                a = 15.0 if e == 0 else arcs[i][-1] - 15.0
+                q = np.array([np.interp(a, arcs[i], pts[i][:, 0]), np.interp(a, arcs[i], pts[i][:, 1])])
+                d, _ = project(j, q[None])
+                if best is None or d < best[0]:
+                    best = (d, j, wj)
+            if best is None:
+                continue
+            _, j, wj = best
+            order = range(len(pts[i])) if e == 0 else range(len(pts[i]) - 1, -1, -1)
+            s0 = arcs[i][0 if e == 0 else -1]
+            sep, delta = None, 0.0
+            for k in order:
+                d, zj = project(j, pts[i][k][None])
+                if d - (wi + wj) / 2 >= TIE_JOIN_M:
+                    sep = k
+                    break
+                if abs(zj - zs[i][k]) > 2.0 + abs(arcs[i][k] - s0) * 0.1:
+                    sep = k                             # (another level: stacked, not side by side)
+                    break
+                delta = zj - zs[i][k]
+                zs[i][k] = zj
+            if sep is None or abs(delta) < 1e-3:
+                continue
+            ss = arcs[i][sep]
+            span = max(TIE_EASE_MIN_M, abs(delta) / TIE_EASE_GRADE)
+            for k in order:
+                along = abs(arcs[i][k] - ss)
+                if (e == 0 and k < sep) or (e == -1 and k > sep):
+                    continue
+                if along >= span:
+                    break
+                zs[i][k] += delta * (1.0 - along / span)
+    return zs
+
+
 def _joined_lines(lines, joins):
     """lines with each end of joins moved onto its joint (copies; the others as they are)."""
     out = list(lines)
@@ -5001,6 +5086,7 @@ class BridgeProfiles:
             except Exception as ex:         # (solved here rather than not at all)
                 log.debug("chain %s from its owner: %s: %s", key, type(ex).__name__, ex)
         zs = self._solve(comp, pool, ground)
+        zs = _tie_beside([pool[k][1] for k in comp], zs, [pool[k][0] for k in comp])     # (ramps beside their road)
         with self.lock:
             for k, z in zip(comp, zs):
                 spec, xy, lon = pool[k][:3]

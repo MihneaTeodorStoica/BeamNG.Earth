@@ -298,5 +298,30 @@ class GoreNoseScenarios(unittest.TestCase):
         self.assertTrue(cov[:30].all())
         np.testing.assert_allclose(ext[:30], 4.5 / 2 + 0.05)
 
+
+class RampTieScenarios(unittest.TestCase):
+    """A ramp leaving its road's deck stays at that deck's height while their slabs are joined, then eases into its own
+    profile (an I-95 exit by the Middle Branch: a lip down the joined slab a car hung on)."""
+
+    def test_ramp_held_level_then_eased(self):
+        xs = np.arange(0.0, 301.0, 5.0)
+        main = np.c_[xs, np.zeros_like(xs)]
+        ramp = np.c_[xs, -0.08 * xs]                       # parting at ~4.6 degrees from the fork at x = 0
+        main_z = np.full(len(xs), 12.0)
+        ramp_z = 12.0 - 0.05 * xs                          # its own solve: down at 5 % from the fork
+        mspec = roads.Spec(width=15.0, kind="paved", urban=False, cls="motorway", oneway=True)
+        rspec = roads.Spec(width=8.0, kind="paved", urban=False, cls="motorway", oneway=True, link=True)
+        mz, rz = roads._tie_beside([main, ramp], [main_z, ramp_z], [mspec, rspec])
+        np.testing.assert_allclose(mz, main_z, err_msg="the main deck as solved")
+        gap = 0.08 * xs - (15.0 + 8.0) / 2
+        joined = gap < roads.TIE_JOIN_M
+        np.testing.assert_allclose(rz[joined], 12.0, atol=1e-6, err_msg="level with the main deck while joined")
+        sep = int(np.flatnonzero(~joined)[0])
+        self.assertTrue(np.all(np.diff(rz[sep:]) <= 1e-9), "then down, no step")
+        g = np.abs(np.diff(rz)) / np.hypot(*np.diff(ramp, axis=0).T)
+        self.assertLessEqual(float(g.max()), 0.05 + roads.TIE_EASE_GRADE + 1e-6)
+        far = xs > xs[sep] + max(roads.TIE_EASE_MIN_M, (12.0 - ramp_z[sep]) / roads.TIE_EASE_GRADE) + 1
+        np.testing.assert_allclose(rz[far], ramp_z[far], err_msg="its own profile past the easing")
+
 if __name__ == "__main__":
     unittest.main()

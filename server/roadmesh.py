@@ -684,7 +684,8 @@ def deck(chunks, origin, piers=(), context=(), beams=(), ground=(), parapets=Non
         # carriageway); a low curb under the rail where mapped guard rails put stock rail modules on it (guardrails)
         for parapet in parapets_by_deck.get(n, ()):
             h = parapet_heights(parapet["mid"], parapet["ends"])
-            h = np.minimum(h, BRIDGE_CURB_H if BRIDGE_RAILS and n in low_parapet_decks else parapet_h)
+            h = np.minimum(h, BRIDGE_CURB_H if BRIDGE_RAILS and n in low_parapet_decks and not parapet.get("nose")
+                           else parapet_h)
             bp, bt_, buv = barrier_solid(parapet["edge"], -parapet["out"], parapet["z"], h, parapet["v"])
             P.append(bp - origin)
             UV.append(buv)
@@ -845,7 +846,9 @@ def _ground_carriageways(chunks):
     return out
 
 
-MEDIAN_NOSE_M = 3.0     # m of gap before MEDIAN_JOIN_M over which a diverging pair's joined slab narrows to a point
+MEDIAN_NOSE_M = 1.5     # m of gap before MEDIAN_JOIN_M over which a diverging pair's joined slab narrows to a point
+                        # (the gore up to it flat pavement, as the real bridge's: 3 m ran the nose's barriers far up
+                        # the gore, a lip between the lanes, the user 2026-10-31)
 NOSE_LOOK_PTS = 5       # ... where the gap widens toward the run's end by NOSE_WIDEN_M over this many points
 NOSE_WIDEN_M = 0.5
 
@@ -1017,14 +1020,15 @@ def parapet_runs(chunks, context=(), _rb=None, ground=(), pads=()):
         wide = 0.0 if c.get("tunnel") else PARAPET_W
         (xl, cl), (xr, cr_) = _noses(medians[n][0]), _noses(medians[n][1])
         covered[n] = (covered[n][0] | cl, covered[n][1] | cr_)
+        nose = ((medians[n][0] > 0) & ~cl, (medians[n][1] > 0) & ~cr_)       # (a gore nose's points: _noses)
         if len(pads):               # (none inside a junction pad: roads.deck_pads)
             import roads as _roads
             covered[n] = (covered[n][0] | _roads.pad_inside(pads, left), covered[n][1] | _roads.pad_inside(pads, right))
         el = left + u * np.maximum(wide, xl)[:, None]
         er = right - u * np.maximum(wide, xr)[:, None]
         k = len(z)
-        for sgn, edge, inner, cov in ((1, el, left, covered[n][0]),
-                                      (-1, er, right, covered[n][1])):
+        for sgn, edge, inner, cov, nz in ((1, el, left, covered[n][0], nose[0]),
+                                          (-1, er, right, covered[n][1], nose[1])):
             i = 0
             while i < k:
                 if cov[i]:
@@ -1053,6 +1057,7 @@ def parapet_runs(chunks, context=(), _rb=None, ground=(), pads=()):
                         "z": z[sl],
                         "v": v[sl],
                         "out": u[sl] * sgn,
+                        "nose": bool(nz[sl].any()),     # (a gore nose's: a full barrier, never the low curb)
                     })
                 i = j + 1
     return out
