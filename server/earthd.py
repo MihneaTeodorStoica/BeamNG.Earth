@@ -1620,7 +1620,7 @@ class Server:
             guardrail_rows = guardrailsmod.forest_rows(anchor.frame, infra_fn, box, elev,
                                                        decks=guardrail_decks, parapets=parapets,
                                                        bridge_rails=roadmeshmod.BRIDGE_RAILS,
-                                                       supported_decks_out=low_parapet_decks)
+                                                       supported_decks_out=low_parapet_decks, roads=near_roads)
         except Exception as ex:
             log.warning("mapped guardrails: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
             # A failed mapped-data pass cannot establish that a bridge needs rails.

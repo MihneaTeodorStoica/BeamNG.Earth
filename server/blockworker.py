@@ -775,7 +775,7 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
         guardrail_rows = guardrailsmod.forest_rows(frame, infra_fn, box, elev,
                                                    decks=guardrail_decks, parapets=parapets,
                                                    bridge_rails=roadmeshmod.BRIDGE_RAILS,
-                                                   supported_decks_out=low_parapet_decks)
+                                                   supported_decks_out=low_parapet_decks, roads=near_roads)
     except Exception as ex:
         log.warning("mapped guardrails: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
         low_parapet_decks.clear()
