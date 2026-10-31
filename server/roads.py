@@ -7060,6 +7060,12 @@ def pad_inside(pads, xy, shrink=0.3):
 # across the car's path) beside the carriageway.
 DECK_WALK = {"m": "sidewalk_concrete", "tl": 6.0, "p": 16}
 DECK_WALK_LIFT_M = 0.03         # m the strip is drawn over the deck (no z fighting with its asphalt)
+# A motorway's or trunk road's deck: its shoulders concrete beside the asphalt lanes (West Coast USA's interchanges,
+# the I-95 viaduct by the Middle Branch in the aerial; the user, 2026-10-31), from its edge line out (the edge layer:
+# under the lines)
+DECK_SHOULDER = {"m": "m_gm_concrete_plain", "tl": 11.0, "p": 20, "layer": "edge"}
+DECK_SHOULDER_CLASSES = {"motorway", "trunk"}
+DECK_SHOULDER_MIN_M = 0.6
 
 
 def _deck_frame(spec, walk):
@@ -7145,6 +7151,10 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
         for look, w, line in extras(spec, pts, lon, shift=shift_of(fid, pts) if shift_of else None):
             if look["m"] not in (SIDEWALK["m"], GUTTER["m"], EDGE_DECAL["m"]):     # (no ground beside a deck)
                 lines.append((look, w, line))
+        sh = edge_margin(spec) if spec.cls in DECK_SHOULDER_CLASSES and spec.kind == "paved" else 0.0
+        if sh >= DECK_SHOULDER_MIN_M:          # its shoulders concrete (DECK_SHOULDER)
+            for side in (1, -1):
+                lines.append((DECK_SHOULDER, sh, offset_polyline(pts, side * (spec.width / 2 - sh / 2))))
         if walks.get(fid):                      # its sidewalks, flush on the deck beside the carriageway
             wm, sides = walks[fid]
             for side in sides:

@@ -231,7 +231,8 @@ class BridgeTest(unittest.TestCase):
         deck = {"m": "road_asphalt_2lane", "w": 8.0, "tl": 11.0, "p": 20, "deck": True, "fixed": True,
                 "n": [[0, 0, 20.0], [50, 0, 22.0]]}
         P, T, UV, mats, M = roadmesh.deck([deck], (0.0, 0.0, 0.0))
-        self.assertEqual(mats, [roadmesh.DECK_SIDE, roadmesh.DECK_TOP], "an opaque slab, a plain asphalt top")
+        self.assertEqual(mats, list(dict.fromkeys([roadmesh.DECK_SIDE, roadmesh.DECK_TOP])),
+                         "an opaque slab, a plain concrete top (one material)")
         n = np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]])
         n /= np.linalg.norm(n, axis=1)[:, None]
         flat = np.abs(n[:, 2]) > 0.5

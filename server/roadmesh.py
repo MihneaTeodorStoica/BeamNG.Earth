@@ -462,7 +462,8 @@ def build(frame, chunks, elev, origin, lift=0.0, clip=None, follow=False, q=None
 DECK_DEPTH = 1.2        # m of deck slab under the surface
 DECK_SKIN = 0.01        # m the road mesh lies over a deck's top (the decal materials are translucent:
                         # 2026-10-11 a deck topped with road_asphalt_2lane was see-through)
-DECK_TOP = "bne_bridge_asphalt"     # the slab's top: plain opaque asphalt (the stock terrain's), under the road's own
+DECK_TOP = "bne_bridge_concrete"    # the slab's top: plain concrete (a gore, a median, the strip under the parapet:
+                                    # West Coast USA's, the user 2026-10-31; was the stock terrain's asphalt), under the road's own
 DECK_TOP_TILE_M = 4.0               # m of asphalt a texture tile covers across ...
 DECK_TOP_V = 10.0 / DECK_TOP_TILE_M  # ... and along (v: the road's, 10 m a tile)
 DECK_SIDE = "bne_bridge_concrete"  # the slab, girders, parapets, piers and tunnel tubes: plain concrete (the stock
