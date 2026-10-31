@@ -210,5 +210,33 @@ class DeckSidewalkScenarios(unittest.TestCase):
         self.assertEqual(roads._deck_frame(spec, (2.0, (-1,))), (12.0, -1.0))
         self.assertEqual(roads._deck_frame(spec, None), (10.0, 0.0))
 
+
+class LaneFlowScenarios(unittest.TestCase):
+    """One-way pieces the map gives no lane count take theirs from what flows in or out (I-95 by the Middle Branch: a
+    4-lane deck took a ramp and went on at the 3-lane default width, 11.8 m after 18.8 m)."""
+
+    def flow(self, lines, lanes, links=()):
+        f = features(lines, ["motorway"] * len(lines), ids=[f"r{k}" for k in range(len(lines))])
+        f.rules["oneway"] = rules([(k, 1.0) for k in range(len(lines))], "float")
+        f.rules["subclass"] = rules([(k, "link") for k in links])
+        f.attrs["osm_lanes"] = np.array([np.nan if v is None else float(v) for v in lanes])
+        return roads.lane_flow(f), roads.road_specs(f)
+
+    def test_merge_adds_the_ramp(self):
+        got, specs = self.flow([[(-300, 0), (0, 0)], [(-200, -150), (0, 0)], [(0, 0), (300, 0)]], [4, None, None], links=[1])
+        self.assertEqual(got[2], 5, "4 lanes + the ramp's one")
+        self.assertGreater(specs[2].width, specs[0].width, "wider than before the merge, not the class default")
+
+    def test_split_and_chain(self):
+        got, _ = self.flow([[(-300, 0), (0, 0)], [(0, 0), (150, 0)], [(150, 0), (300, 0)], [(150, 0), (300, -150)]],
+                           [5, None, None, None], links=[3])
+        self.assertEqual(got[1], 5, "a road going on keeps its lanes")
+        self.assertEqual(got[2], 4, "past the exit: what arrives less the ramp")
+        self.assertIsNone(got[3], "(a ramp: its own one-lane width)")
+
+    def test_map_counts_and_two_way_roads_stand(self):
+        got, _ = self.flow([[(-300, 0), (0, 0)], [(0, 0), (300, 0)]], [4, 3])
+        self.assertEqual(list(got), [None, None], "the map's own counts are not replaced")
+
 if __name__ == "__main__":
     unittest.main()

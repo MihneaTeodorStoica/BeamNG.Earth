@@ -1618,6 +1618,55 @@ def taper_widths(width, tapers, lon, lat):
     return out if hit else None
 
 
+# Lane counts through merges and splits (the user, 2026-10-31, I-95's viaduct by the Middle Branch: "the generator
+# gets very confused on what the width the bridges should be as they merge and split"): OpenStreetMap counts some
+# pieces of a one-way road and not others, and a piece without a count took its class's width: a 4-lane deck (18.8 m)
+# took a 1-lane ramp and went on 11.8 m wide. Where the map gives none, a one-way piece takes what flows into it at a
+# merge or a road going on, or out of it at a split, or its branch's share (earthfast.lane_flow); ramps count as one.
+LANE_FLOW_CLASSES = {"motorway", "trunk", "primary", "secondary"}
+LANE_FLOW_MAX = 8
+
+
+def lane_flow(feats):
+    """Per feature: its lane count found from the one-way roads joined to it (LANE_FLOW_*), None where none was (or the
+    map gives one). Pure; remembered on feats."""
+    got = feats.__dict__.get("_lane_flow")
+    if got is not None:
+        return got
+    import fast
+    fast.require(118, "lane_flow")
+    n = len(feats)
+    out = [None] * n
+    if n:
+        starts = feats.coord_off[feats.ring_off[feats.part_off[:-1]]]
+        stops = feats.coord_off[feats.ring_off[feats.part_off[1:]]]
+        off = np.zeros(n + 1, np.int64)
+        off[1:] = np.cumsum(stops - starts)
+        if off[-1]:
+            lonlat = np.concatenate([feats.lonlat[a:b] for a, b in zip(starts, stops)])
+            attrs = np.zeros((n, 3))
+            attrs[:, 1] = np.nan
+            cls = feats.attrs.get("class")
+            sub = feats.attrs.get("subtype")
+            rules = feats.rules
+            for i in range(n):
+                if cls is None or str(cls[i]) not in LANE_FLOW_CLASSES or (sub is not None and str(sub[i]) != "road"):
+                    continue
+                v = _rule_value(rules.get("oneway"), i)
+                if v is None:
+                    continue
+                attrs[i, 0] = -1.0 if float(v) < 0 else 1.0
+                lanes = _osm(feats, "lanes", i, *OSM_LANES)
+                if lanes is not None:
+                    attrs[i, 1] = float(int(lanes))
+                attrs[i, 2] = 1.0 if _rule_value(rules.get("subclass"), i) == "link" else 0.0
+            got = np.asarray(fast._ef.lane_flow(np.ascontiguousarray(lonlat, np.float64), off, attrs,
+                                                float(LANE_FLOW_MAX)))
+            out = [None if not np.isfinite(x) or attrs[i, 2] > 0.5 else int(x) for i, x in enumerate(got)]
+    feats.__dict__["_lane_flow"] = out
+    return out
+
+
 def _spec_json(sp):
     return {f: (v.item() if hasattr(v, "item") else list(v) if isinstance(v, tuple) else v)
             for f, v in sp._asdict().items()}
@@ -1698,7 +1747,7 @@ def _road_specs(feats, urban_fn, left_hand):
         if rule_w is None:
             rule_w = _osm(feats, "width", i, *OSM_WIDTH_M)      # OpenStreetMap's width (osmtags.py)
         lanes = _osm(feats, "lanes", i, *OSM_LANES)
-        lanes = int(lanes) if lanes is not None else None
+        lanes = int(lanes) if lanes is not None else lane_flow(feats)[i]     # (through merges / splits: lane_flow)
         surf = _rule_value(rules.get("surface"), i)
         kind = surface_kind(cls, surf)
         ow = _rule_value(rules.get("oneway"), i) is not None
@@ -1896,7 +1945,7 @@ def _bridge_specs(feats, want="bridge"):
         if rule_w is None:
             rule_w = _osm(feats, "width", i, *OSM_WIDTH_M)
         lanes = _osm(feats, "lanes", i, *OSM_LANES)
-        lanes = int(lanes) if lanes is not None else None
+        lanes = int(lanes) if lanes is not None else lane_flow(feats)[i]     # (through merges / splits: lane_flow)
         surf = _rule_value(rules.get("surface"), i)
         kind = surface_kind(cls, surf)
         ow = _rule_value(rules.get("oneway"), i) is not None

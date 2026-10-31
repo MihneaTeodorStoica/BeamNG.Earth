@@ -135,3 +135,107 @@ pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
     let flat: Vec<f64> = rows.iter().flatten().copied().collect();
     numpy::ndarray::Array2::from_shape_vec((rows.len(), 5), flat).unwrap().into_pyarray(py)
 }
+
+/// Lane counts along one-way roads (server roads.py lane_flow): lonlat (P, 2) and off (n + 1) as road_tapers; attrs
+/// (n, 3): one-way direction along the geometry (+1 / -1; 0: not counted), the map's lane count (NaN: unknown), a
+/// ramp (1: unknown counts as one lane). A road with no count takes the sum of the counts flowing into its start where
+/// only it leaves (a merge, or a road going on), else of those flowing out of its end where only it arrives (a split),
+/// else a branch's share: what arrives at its split less the other branches (or leaves its merge less the others);
+/// repeated until nothing changes (a chain of pieces). A node where a road not counted ends is left alone. Returns (n,)
+/// the counts found (NaN: none), at most max_lanes.
+#[pyfunction]
+pub fn lane_flow<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: PyReadonlyArray1<'py, i64>,
+                      attrs: PyReadonlyArray2<'py, f64>, max_lanes: f64) -> Bound<'py, numpy::PyArray1<f64>> {
+    let (ll, off, at) = (lonlat.as_array(), off.as_array(), attrs.as_array());
+    let n = off.len().saturating_sub(1);
+    let out = py.allow_threads(|| {
+        let key = |k: usize| ((ll[[k, 0]] * 1e6).round() as i64, (ll[[k, 1]] * 1e6).round() as i64);
+        let mut node: HashMap<(i64, i64), usize> = HashMap::new();
+        let mut blocked: Vec<bool> = Vec::new();        // a node a road not counted ends at
+        let mut tail = vec![usize::MAX; n];
+        let mut head = vec![usize::MAX; n];
+        let mut id = |k: (i64, i64), node: &mut HashMap<(i64, i64), usize>, blocked: &mut Vec<bool>| -> usize {
+            let len = node.len();
+            *node.entry(k).or_insert_with(|| {
+                blocked.push(false);
+                len
+            })
+        };
+        for i in 0..n {
+            let (a, b) = (off[i] as usize, off[i + 1] as usize);
+            if b < a + 2 {
+                continue;
+            }
+            let (na, nb) = (id(key(a), &mut node, &mut blocked), id(key(b - 1), &mut node, &mut blocked));
+            let d = at[[i, 0]];
+            if d == 0.0 {
+                blocked[na] = true;
+                blocked[nb] = true;
+                continue;
+            }
+            if d > 0.0 { tail[i] = na; head[i] = nb; } else { tail[i] = nb; head[i] = na; }
+        }
+        let nn = node.len();
+        let mut ins: Vec<Vec<usize>> = vec![Vec::new(); nn];     // roads whose traffic arrives at the node
+        let mut outs: Vec<Vec<usize>> = vec![Vec::new(); nn];    // ... leaves it
+        for i in 0..n {
+            if tail[i] != usize::MAX {
+                outs[tail[i]].push(i);
+                ins[head[i]].push(i);
+            }
+        }
+        let mut lanes: Vec<f64> = (0..n).map(|i| {
+            let v = at[[i, 1]];
+            if v.is_nan() && at[[i, 2]] > 0.5 { 1.0 } else { v }
+        }).collect();
+        let known0: Vec<bool> = lanes.iter().map(|v| !v.is_nan()).collect();
+        let sum = |list: &Vec<usize>, lanes: &Vec<f64>| -> Option<f64> {
+            if list.is_empty() { return None; }
+            let mut s = 0.0;
+            for &j in list {
+                if lanes[j].is_nan() { return None; }
+                s += lanes[j];
+            }
+            Some(s)
+        };
+        for _ in 0..16 {
+            let mut changed = false;
+            for i in 0..n {
+                if tail[i] == usize::MAX || !lanes[i].is_nan() {
+                    continue;
+                }
+                let (t, h) = (tail[i], head[i]);
+                let mut got = None;
+                if !blocked[t] && outs[t].len() == 1 {
+                    got = sum(&ins[t], &lanes);
+                }
+                if got.is_none() && !blocked[h] && ins[h].len() == 1 {
+                    got = sum(&outs[h], &lanes);
+                }
+                // a branch of a split (what arrives less the other branches) or of a merge (what leaves less the
+                // other roads arriving), at least one lane
+                let others = |list: &Vec<usize>| -> Vec<usize> { list.iter().copied().filter(|&j| j != i).collect() };
+                if got.is_none() && !blocked[t] && outs[t].len() > 1 {
+                    if let (Some(a), Some(b)) = (sum(&ins[t], &lanes), sum(&others(&outs[t]), &lanes)) {
+                        if a - b >= 1.0 { got = Some(a - b); }
+                    }
+                }
+                if got.is_none() && !blocked[h] && ins[h].len() > 1 {
+                    if let (Some(a), Some(b)) = (sum(&outs[h], &lanes), sum(&others(&ins[h]), &lanes)) {
+                        if a - b >= 1.0 { got = Some(a - b); }
+                    }
+                }
+                if let Some(v) = got {
+                    lanes[i] = v.min(max_lanes);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // only what was found: the map's own counts and the ramps' one lane stay the caller's
+        (0..n).map(|i| if known0[i] { f64::NAN } else { lanes[i] }).collect::<Vec<f64>>()
+    });
+    out.into_pyarray(py)
+}
