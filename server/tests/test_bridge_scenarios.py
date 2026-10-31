@@ -245,5 +245,36 @@ class LaneFlowScenarios(unittest.TestCase):
         got, _ = self.flow([[(-300, 0), (0, 0)], [(0, 0), (300, 0)]], [4, 3])
         self.assertEqual(list(got), [None, None], "the map's own counts are not replaced")
 
+
+class LaneShiftScenarios(unittest.TestCase):
+    """At a merge the wider piece's lines start shifted toward the ramp, going on from the narrower piece's (I-95 by the
+    Middle Branch: every line jumped about 1.8 m at the joint)."""
+
+    def lane_offsets(self, f, i, x):
+        sp = roads.road_specs(f)[i]
+        xs = np.linspace(x, x + 40.0, 21) if x >= 0 else np.linspace(x, 0.0, 21)
+        pts = np.c_[xs, np.zeros_like(xs), np.zeros_like(xs)]
+        la, lo, _ = FRAME.enu_to_geodetic(xs, np.zeros_like(xs), 0.0)
+        sh = roads.shift_at(roads.lane_shifts(f)[i], lo, la)
+        lines = [ln for look, _w, ln in roads.extras(sp, pts, -76.6, shift=sh) if look.get("kind") in ("lane", "edge")]
+        at = 0 if x >= 0 else -1                    # (the point at the joint)
+        return sorted(round(float(ln[at if len(ln) else 0, 1]), 1) for ln in lines
+                      if np.hypot(*(ln[at, :2] - [0.0, 0.0])) < 15.0)
+
+    def test_merge_lines_go_on(self):
+        f = features([[(-300, 0), (0, 0)], [(-200, 150), (0, 0)], [(0, 0), (300, 0)]], ["motorway"] * 3,
+                     ids=["main", "ramp", "on"])
+        f.rules["oneway"] = rules([(k, 1.0) for k in range(3)], "float")
+        f.rules["subclass"] = rules([(1, "link")])
+        f.attrs["osm_lanes"] = np.array([4.0, np.nan, np.nan])
+        self.assertEqual(roads.lane_flow(f)[2], 5)
+        shifts = roads.lane_shifts(f)[2]
+        self.assertEqual(len(shifts), 1)
+        self.assertGreater(shifts[0][2], 0.0, "toward the ramp: it comes in from the left (north)")
+        before = self.lane_offsets(f, 0, -40.0)
+        after = self.lane_offsets(f, 2, 0.0)
+        for y in before:
+            self.assertTrue(any(abs(y - y2) < 0.15 for y2 in after), f"the line at {y} m goes on: {after}")
+
 if __name__ == "__main__":
     unittest.main()

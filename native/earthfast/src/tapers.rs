@@ -263,3 +263,125 @@ pub fn lane_flow<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: 
     });
     out.into_pyarray(py)
 }
+
+/// Lane line shifts at merges and splits (server roads.py lane_shifts): where a one-way road takes a ramp and goes on
+/// wider (a merge) or leaves one and goes on narrower (a split), the wider piece's lines start shifted toward the ramp
+/// so they go on from the narrower piece's (the added lane opens on the ramp's side). lonlat (P, 2), off (n + 1);
+/// attrs (n, 4): one-way direction along the geometry (+1 / -1; 0: not counted), drawn width (m), ramp (1), class
+/// code; params: m of easing per m of shift, shortest, longest, share of the road, least shift. Returns (T, 5): road,
+/// lon, lat (the joint), shift (m, + to the left of its geometry), length (m).
+#[pyfunction]
+pub fn lane_shifts<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: PyReadonlyArray1<'py, i64>,
+                        attrs: PyReadonlyArray2<'py, f64>, params: PyReadonlyArray1<'py, f64>)
+                        -> Bound<'py, PyArray2<f64>> {
+    let (ll, off, at, p) = (lonlat.as_array(), off.as_array(), attrs.as_array(), params.as_array());
+    let (m_per_m, min_l, max_l, share, min_shift) = (p[0], p[1], p[2], p[3], p[4]);
+    let n = off.len().saturating_sub(1);
+    let rows = py.allow_threads(|| {
+        let mut rows: Vec<[f64; 5]> = Vec::new();
+        let ok: Vec<bool> = (0..n).map(|i| (off[i + 1] - off[i]) >= 2 && at[[i, 0]] != 0.0).collect();
+        if !ok.iter().any(|&b| b) {
+            return rows;
+        }
+        let (mut lat_sum, mut cnt) = (0.0, 0.0);
+        for i in 0..n {
+            if ok[i] {
+                lat_sum += ll[[off[i] as usize, 1]];
+                cnt += 1.0;
+            }
+        }
+        let (mx, my) = (111320.0 * (lat_sum / cnt).to_radians().cos(), 110540.0);
+        let key = |k: usize| ((ll[[k, 0]] * 1e6).round() as i64, (ll[[k, 1]] * 1e6).round() as i64);
+        // per node: roads arriving and leaving (by traffic), with the end of each at it
+        let mut ins: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        let mut outs: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        let mut node = vec![((0i64, 0i64), (0i64, 0i64)); n];         // (tail, head)
+        for i in 0..n {
+            if !ok[i] {
+                continue;
+            }
+            let (a, b) = (key(off[i] as usize), key(off[i + 1] as usize - 1));
+            let (t, h) = if at[[i, 0]] > 0.0 { (a, b) } else { (b, a) };
+            node[i] = (t, h);
+            outs.entry(t).or_default().push(i);
+            ins.entry(h).or_default().push(i);
+        }
+        // unit direction of travel of road i at node end (start: leaving the node; end: arriving at it), and its length
+        let travel = |i: usize, at_tail: bool| -> (Option<[f64; 2]>, f64) {
+            let (a, b) = (off[i] as usize, off[i + 1] as usize);
+            let fwd = at[[i, 0]] > 0.0;
+            // the geometry end at the node: tail = start when fwd
+            let from_start = at_tail == fwd;
+            let idx = |k: usize| if from_start { a + k } else { b - 1 - k };
+            let (x0, y0) = (ll[[idx(0), 0]], ll[[idx(0), 1]]);
+            let (mut s, mut dir, mut px, mut py_) = (0.0, None, 0.0, 0.0);
+            for k in 1..(b - a) {
+                let (x, y) = ((ll[[idx(k), 0]] - x0) * mx, (ll[[idx(k), 1]] - y0) * my);
+                s += (x - px).hypot(y - py_);
+                px = x;
+                py_ = y;
+                if dir.is_none() && s >= 15.0 {
+                    dir = Some([x, y]);
+                }
+            }
+            let v = dir.unwrap_or([px, py_]);
+            let l = v[0].hypot(v[1]);
+            if l < 1e-6 {
+                return (None, s);
+            }
+            // away from the node; travel direction: away at the tail, toward it at the head
+            let u = [v[0] / l, v[1] / l];
+            (Some(if at_tail { u } else { [-u[0], -u[1]] }), s)
+        };
+        // geometry's left at the node end, as +1 / -1 against the travel direction
+        let geom_sign = |i: usize| if at[[i, 0]] > 0.0 { 1.0 } else { -1.0 };
+        for i in 0..n {
+            if !ok[i] || at[[i, 2]] > 0.5 {
+                continue;                       // (ramps keep their lines)
+            }
+            for at_tail in [true, false] {
+                let (t, h) = node[i];
+                let nd = if at_tail { t } else { h };
+                // a merge into i at its tail: i the only road leaving, one same-class road and ramp(s) arriving;
+                // a split off i at its head: i the only road arriving, one same-class road and ramp(s) leaving
+                let (alone, others) = if at_tail { (outs.get(&nd), ins.get(&nd)) } else { (ins.get(&nd), outs.get(&nd)) };
+                let (Some(alone), Some(others)) = (alone, others) else { continue };
+                if alone.len() != 1 || others.len() < 2 {
+                    continue;
+                }
+                let mains: Vec<usize> = others.iter().copied()
+                    .filter(|&j| at[[j, 2]] < 0.5 && at[[j, 3]] == at[[i, 3]]).collect();
+                let ramps: Vec<usize> = others.iter().copied().filter(|&j| at[[j, 2]] > 0.5).collect();
+                if mains.len() != 1 || ramps.is_empty() || mains.len() + ramps.len() != others.len() {
+                    continue;
+                }
+                let j = mains[0];
+                let dw = at[[i, 1]] - at[[j, 1]];
+                if dw / 2.0 < min_shift {
+                    continue;                   // (not wider than the road it goes on from)
+                }
+                let (Some(di), length) = travel(i, at_tail) else { continue };
+                // the ramps' side of i: + left of its travel direction
+                let mut side = 0.0;
+                for &r in &ramps {
+                    let (Some(dr), _) = travel(r, !at_tail) else { continue };
+                    // the ramp's travel direction, at the node; where it comes from / goes to relative to i
+                    let v = if at_tail { [-dr[0], -dr[1]] } else { dr };
+                    side += di[0] * v[1] - di[1] * v[0];
+                }
+                if side.abs() < 1e-3 {
+                    continue;
+                }
+                let toward = side.signum() * geom_sign(i);      // (+ left of i's geometry)
+                let shift = toward * dw / 2.0;
+                let span = (dw / 2.0 * m_per_m).clamp(min_l, max_l).min(share * length);
+                let v = if (at_tail && at[[i, 0]] > 0.0) || (!at_tail && at[[i, 0]] < 0.0) { off[i] as usize }
+                        else { off[i + 1] as usize - 1 };
+                rows.push([i as f64, ll[[v, 0]], ll[[v, 1]], shift, span]);
+            }
+        }
+        rows
+    });
+    let flat: Vec<f64> = rows.iter().flatten().copied().collect();
+    numpy::ndarray::Array2::from_shape_vec((rows.len(), 5), flat).unwrap().into_pyarray(py)
+}
