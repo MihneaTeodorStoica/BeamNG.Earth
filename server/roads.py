@@ -1622,7 +1622,9 @@ def taper_widths(width, tapers, lon, lat):
 # gets very confused on what the width the bridges should be as they merge and split"): OpenStreetMap counts some
 # pieces of a one-way road and not others, and a piece without a count took its class's width: a 4-lane deck (18.8 m)
 # took a 1-lane ramp and went on 11.8 m wide. Where the map gives none, a one-way piece takes what flows into it at a
-# merge or a road going on, or out of it at a split, or its branch's share (earthfast.lane_flow); ramps count as one.
+# merge or a road going on, or out of it at a split, or its branch's share (earthfast.lane_flow); ramps count as one,
+# and where the map gives no count near it a road counts as its class's default lanes (a merge with a ramp still adds
+# one: the northbound deck there, no counts at all, stepped where its ramp joined).
 LANE_FLOW_CLASSES = {"motorway", "trunk", "primary", "secondary"}
 LANE_FLOW_MAX = 8
 
@@ -1644,8 +1646,10 @@ def lane_flow(feats):
         off[1:] = np.cumsum(stops - starts)
         if off[-1]:
             lonlat = np.concatenate([feats.lonlat[a:b] for a, b in zip(starts, stops)])
-            attrs = np.zeros((n, 3))
+            attrs = np.zeros((n, 4))
             attrs[:, 1] = np.nan
+            attrs[:, 3] = np.nan
+            dflt = {}                       # class -> its one-way carriageway's lanes when the map gives none
             cls = feats.attrs.get("class")
             sub = feats.attrs.get("subtype")
             rules = feats.rules
@@ -1660,6 +1664,11 @@ def lane_flow(feats):
                 if lanes is not None:
                     attrs[i, 1] = float(int(lanes))
                 attrs[i, 2] = 1.0 if _rule_value(rules.get("subclass"), i) == "link" else 0.0
+                c = str(cls[i])
+                if c not in dflt:
+                    dflt[c] = lane_layout(Spec(carriageway(c, "paved", False, None, True, None), "paved", False, c,
+                                               True))[1]
+                attrs[i, 3] = float(dflt[c])
             got = np.asarray(fast._ef.lane_flow(np.ascontiguousarray(lonlat, np.float64), off, attrs,
                                                 float(LANE_FLOW_MAX)))
             out = [None if not np.isfinite(x) or attrs[i, 2] > 0.5 else int(x) for i, x in enumerate(got)]

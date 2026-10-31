@@ -234,6 +234,13 @@ class LaneFlowScenarios(unittest.TestCase):
         self.assertEqual(got[2], 4, "past the exit: what arrives less the ramp")
         self.assertIsNone(got[3], "(a ramp: its own one-lane width)")
 
+    def test_no_counts_at_all_a_ramp_still_adds_a_lane(self):
+        got, specs = self.flow([[(-300, 0), (0, 0)], [(-200, -150), (0, 0)], [(0, 0), (300, 0)]], [None, None, None],
+                               links=[1])
+        dflt = roads.lane_layout(specs[0])[1]
+        self.assertEqual(got[2], dflt + 1, "its class's default lanes + the ramp's")
+        self.assertGreater(specs[2].width, specs[0].width)
+
     def test_map_counts_and_two_way_roads_stand(self):
         got, _ = self.flow([[(-300, 0), (0, 0)], [(0, 0), (300, 0)]], [4, 3])
         self.assertEqual(list(got), [None, None], "the map's own counts are not replaced")

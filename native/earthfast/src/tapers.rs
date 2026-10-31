@@ -189,6 +189,8 @@ pub fn lane_flow<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: 
             if v.is_nan() && at[[i, 2]] > 0.5 { 1.0 } else { v }
         }).collect();
         let known0: Vec<bool> = lanes.iter().map(|v| !v.is_nan()).collect();
+        let mut deflt = vec![false; n];          // (phase 2: counting as its default)
+        let mut found_default = vec![false; n];
         let sum = |list: &Vec<usize>, lanes: &Vec<f64>| -> Option<f64> {
             if list.is_empty() { return None; }
             let mut s = 0.0;
@@ -198,10 +200,22 @@ pub fn lane_flow<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: 
             }
             Some(s)
         };
+        for phase in 0..2 {
+        // phase 1: the map's counts alone; phase 2: a road still without one counts as its class's default lanes
+        // where it feeds or takes another (a merge with a ramp adds a lane, a split takes one) - after the map's own
+        // counts went as far as they go
+        if phase == 1 {
+            for i in 0..n {
+                if lanes[i].is_nan() && !at[[i, 3]].is_nan() && tail[i] != usize::MAX {
+                    deflt[i] = true;
+                    lanes[i] = at[[i, 3]];
+                }
+            }
+        }
         for _ in 0..16 {
             let mut changed = false;
             for i in 0..n {
-                if tail[i] == usize::MAX || !lanes[i].is_nan() {
+                if tail[i] == usize::MAX || (!lanes[i].is_nan() && !(phase == 1 && deflt[i])) {
                     continue;
                 }
                 let (t, h) = (tail[i], head[i]);
@@ -225,17 +239,27 @@ pub fn lane_flow<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: 
                         if a - b >= 1.0 { got = Some(a - b); }
                     }
                 }
+                if phase == 1 && got.map_or(false, |v| v <= at[[i, 3]]) {
+                    got = None;                 // (on defaults only a merge's added lane: never narrower than its own)
+                }
                 if let Some(v) = got {
-                    lanes[i] = v.min(max_lanes);
-                    changed = true;
+                    let v = v.min(max_lanes);
+                    if lanes[i].is_nan() || (v - lanes[i]).abs() > 0.5 {
+                        changed = true;
+                    }
+                    lanes[i] = v;
+                    if phase == 1 {
+                        found_default[i] = true;
+                    }
                 }
             }
             if !changed {
                 break;
             }
         }
+        }
         // only what was found: the map's own counts and the ramps' one lane stay the caller's
-        (0..n).map(|i| if known0[i] { f64::NAN } else { lanes[i] }).collect::<Vec<f64>>()
+        (0..n).map(|i| if known0[i] || (deflt[i] && !found_default[i]) { f64::NAN } else { lanes[i] }).collect::<Vec<f64>>()
     });
     out.into_pyarray(py)
 }
