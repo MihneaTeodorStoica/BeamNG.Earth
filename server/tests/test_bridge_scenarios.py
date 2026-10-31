@@ -96,5 +96,69 @@ class DeckHeightScenarios(unittest.TestCase):
             self.assertAlmostEqual(z[-1], FLAT, delta=0.6, msg=f"{fid} ends on its approach")
 
 
+
+def chain(widths, classes=None, bridged=(), extra=()):
+    """Roads end to end along x (each 200 m, from x = -200 on) with these widths (the map's width rule), + extra lines."""
+    lines = [[(-200 + 200 * k, 0), (200 * k, 0)] for k in range(len(widths))] + [ln for ln, _ in extra]
+    classes = list(classes or ["primary"] * len(widths)) + [c for _, c in extra]
+    f = features(lines, classes, widths=[(k, float(w)) for k, w in enumerate(widths)],
+                 flags=[(k, "is_bridge", 0.0, 1.0) for k in bridged], ids=[f"r{k}" for k in range(len(lines))])
+    f.attrs["name"] = np.array([""] * len(lines))
+    return f
+
+
+def width_at(f, i, x, y=0.0):
+    sp = roads.road_specs(f)[i]
+    la, lo, _ = FRAME.enu_to_geodetic(np.array([float(x)]), np.array([float(y)]), 0.0)
+    ws = roads.taper_widths(sp.width, roads.road_tapers(f)[i], lo, la)
+    return sp.width if ws is None else float(ws[0])
+
+
+class LaneTaperScenarios(unittest.TestCase):
+    """Where the map's lane count changes the drawn width runs over a taper instead of stepping (the user, 2026-10-31:
+    "the bridge geometry as lanes merge and split is rough")."""
+
+    def test_two_ground_roads_meet_half_way(self):
+        f = chain([10.0, 16.0])
+        self.assertAlmostEqual(width_at(f, 0, 0.0), 13.0, delta=0.05, msg="the narrow one widens to half way")
+        self.assertAlmostEqual(width_at(f, 1, 0.0), 13.0, delta=0.05, msg="the wide one narrows to half way")
+        span = float(np.clip(6.0 * roads.TAPER_M_PER_M, *roads.TAPER_M))
+        self.assertAlmostEqual(width_at(f, 0, -span - 1), 10.0, delta=0.01, msg="its own width past the taper")
+        self.assertAlmostEqual(width_at(f, 1, span + 1), 16.0, delta=0.01)
+        ws = [width_at(f, 0, x) for x in np.linspace(-span, 0.0, 30)]
+        self.assertTrue(np.all(np.diff(ws) >= -1e-9), "widening steadily")
+        self.assertLess(float(np.abs(np.diff(ws)).max()), 6.0 / 2 / 30 * 2.0, "no step (smoothstep: at most 1.5x the mean rate)")
+
+    def test_ground_road_meets_a_wider_deck_at_its_width(self):
+        """The deck keeps its width (its parapets and collision): the road onto it takes all of the change."""
+        f = chain([10.0, 16.0], bridged=[1])
+        self.assertAlmostEqual(width_at(f, 0, 0.0), roads.bridge_specs(f)[1].width, delta=0.05)
+        self.assertEqual(roads.road_tapers(f)[1], (), "no taper on the deck")
+
+    def test_small_change_and_side_roads_keep_their_width(self):
+        self.assertEqual(list(roads.road_tapers(chain([10.0, 10.2]))), [(), ()], "under TAPER_MIN_DW: as before")
+        f = chain([10.0], extra=[([(0.0, 0.0), (0.0, 200.0)], "primary")])      # a side road from its end, at 90 deg
+        self.assertEqual(roads.road_tapers(f)[0], (), "a junction's arm is not a continuation")
+        f = chain([10.0, 16.0], classes=["primary", "secondary"])
+        self.assertEqual(roads.road_tapers(f)[0], (), "another class: a junction, not the same road")
+
+    def test_edge_lines_follow_the_taper(self):
+        f = chain([10.0, 16.0], classes=["trunk", "trunk"])
+        sp = roads.road_specs(f)[0]
+        x = np.linspace(-150.0, 0.0, 76)
+        pts = np.c_[x, np.zeros_like(x), np.zeros_like(x)]
+        la, lo, _ = FRAME.enu_to_geodetic(x, np.zeros_like(x), 0.0)
+        ws = roads.taper_widths(sp.width, roads.road_tapers(f)[0], lo, la)
+        self.assertIsNotNone(ws)
+        edges = [ln for look, _w, ln in roads.extras(sp, pts, -76.6, ws=ws) if look.get("kind") == "edge"]
+        self.assertEqual(len(edges), 2)
+        for ln in edges:
+            off = np.abs(ln[:, 1])
+            self.assertAlmostEqual(float(off[0]), 10.0 / 2 - roads.EDGE_LINE["inset"], delta=0.05)
+            self.assertAlmostEqual(float(off[-1]), 13.0 / 2 - roads.EDGE_LINE["inset"], delta=0.05)
+        plain = [ln for look, _w, ln in roads.extras(sp, pts, -76.6) if look.get("kind") == "edge"]
+        self.assertAlmostEqual(float(np.abs(plain[0][-1, 1])), 10.0 / 2 - roads.EDGE_LINE["inset"], delta=0.05,
+                               msg="(without ws: as before)")
+
 if __name__ == "__main__":
     unittest.main()
