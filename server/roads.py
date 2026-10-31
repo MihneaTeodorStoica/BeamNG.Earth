@@ -2326,12 +2326,31 @@ def _tie_beside(lines, zs, specs):
         k = int(np.argmin(d))
         return float(d[k]), float(zs[j][k] + t[k] * (zs[j][k + 1] - zs[j][k]))
 
+    own = [z.copy() for z in zs]
+
+    def free(i, e):
+        """Whether end e of part i is an abutment: on no other part's end nor its deck (the road going on on the
+        ground from it)."""
+        p = pts[i][e]
+        for j in range(n):
+            if j == i or len(pts[j]) < 2:
+                continue
+            if min(np.hypot(*(pts[j][0] - p)), np.hypot(*(pts[j][-1] - p))) <= 1.0:
+                return False
+            if project(j, p[None])[0] <= float(specs[j].width) / 2 + 1.0:
+                return False
+        return True
+
     for i in range(n):
         if len(pts[i]) < 2:
             continue
         wi = float(specs[i].width)
         for e in (0, -1):
             p = pts[i][e]
+            # (its other end an abutment: held no nearer it than its ease back down takes, its own height there kept;
+            # a ramp beside its road the whole way from the fork to its abutment had been held at the road's height
+            # to its very start, 4.9 m over the ground road going on from it: MLK Boulevard by I-395, Baltimore)
+            far = free(i, -1 - e)
             best = None
             for j in range(n):
                 if j == i or len(pts[j]) < 2:
@@ -2358,6 +2377,7 @@ def _tie_beside(lines, zs, specs):
             order = range(len(pts[i])) if e == 0 else range(len(pts[i]) - 1, -1, -1)
             s0 = arcs[i][0 if e == 0 else -1]
             sep, delta = None, 0.0
+            s_far = arcs[i][-1 if e == 0 else 0]
             for k in order:
                 d, zj = project(j, pts[i][k][None])
                 if d - (wi + wj) / 2 >= TIE_JOIN_M:
@@ -2366,12 +2386,17 @@ def _tie_beside(lines, zs, specs):
                 if abs(zj - zs[i][k]) > 2.0 + abs(arcs[i][k] - s0) * 0.1:
                     sep = k                             # (another level: stacked, not side by side)
                     break
+                if far and abs(s_far - arcs[i][k]) < max(TIE_EASE_MIN_M, abs(zj - own[i][k]) / TIE_EASE_GRADE):
+                    sep = k
+                    break
                 delta = zj - zs[i][k]
                 zs[i][k] = zj
             if sep is None or abs(delta) < 1e-3:
                 continue
             ss = arcs[i][sep]
             span = max(TIE_EASE_MIN_M, abs(delta) / TIE_EASE_GRADE)
+            if far:
+                span = min(span, max(abs(s_far - ss), 1e-3))
             for k in order:
                 along = abs(arcs[i][k] - ss)
                 if (e == 0 and k < sep) or (e == -1 and k > sep):

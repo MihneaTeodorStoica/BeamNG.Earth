@@ -332,7 +332,7 @@ class RampTieScenarios(unittest.TestCase):
     profile (an I-95 exit by the Middle Branch: a lip down the joined slab a car hung on)."""
 
     def test_ramp_held_level_then_eased(self):
-        xs = np.arange(0.0, 301.0, 5.0)
+        xs = np.arange(0.0, 801.0, 5.0)                    # (its abutment far off: the ease fits before it)
         main = np.c_[xs, np.zeros_like(xs)]
         ramp = np.c_[xs, -0.08 * xs]                       # parting at ~4.6 degrees from the fork at x = 0
         main_z = np.full(len(xs), 12.0)
@@ -350,6 +350,21 @@ class RampTieScenarios(unittest.TestCase):
         self.assertLessEqual(float(g.max()), 0.05 + roads.TIE_EASE_GRADE + 1e-6)
         far = xs > xs[sep] + max(roads.TIE_EASE_MIN_M, (12.0 - ramp_z[sep]) / roads.TIE_EASE_GRADE) + 1
         np.testing.assert_allclose(rz[far], ramp_z[far], err_msg="its own profile past the easing")
+
+    def test_abutment_beside_the_road_keeps_its_height(self):
+        # a ramp running beside its road the whole way from the fork to its own abutment, climbing from the ground
+        # there (MLK Boulevard by I-395, Baltimore: held at the road's height to its start, 4.9 m over the ground road)
+        xs = np.arange(0.0, 191.0, 5.0)
+        main = np.c_[xs, np.zeros_like(xs)]
+        ramp = np.c_[xs, np.full(len(xs), -13.0)]          # beside it, 13 m apart: slabs joined (gap 1 m)
+        main_z = np.full(len(xs), 15.7)
+        ramp_z = np.interp(xs, [0.0, 110.0, 190.0], [15.7, 15.7, 11.6])     # fork at x = 0, abutment at x = 190
+        mspec = roads.Spec(width=16.0, kind="paved", urban=False, cls="motorway", oneway=True)
+        rspec = roads.Spec(width=8.0, kind="paved", urban=False, cls="motorway", oneway=True, link=True)
+        _, rz = roads._tie_beside([main, ramp], [main_z, ramp_z], [mspec, rspec])
+        self.assertAlmostEqual(float(rz[-1]), 11.6, places=6, msg="its abutment at its own (the ground's) height")
+        g = np.abs(np.diff(rz)) / 5.0
+        self.assertLessEqual(float(g.max()), 0.0513 + roads.TIE_EASE_GRADE * 2, "no step on the way down")
 
 
 class ForkPadScenarios(unittest.TestCase):
