@@ -6921,6 +6921,33 @@ PAD_WALL_DROP_M = 1.0
 PAD_RIM_STEP_M = 1.0
 
 
+PAD_FORK_COS = 0.85         # two parts leaving a joint this close in direction run on side by side (a fork) ...
+PAD_FORK_STRAIGHT_COS = -0.9    # ... or this straight on from each other
+
+
+def _fork(parts):
+    """Whether the parts at a joint ([(line from the joint (k, 2), z, half width)]) make a fork or merge: every pair
+    goes straight on from each other or runs on side by side (PAD_FORK_*), none at an angle. A ramp parting from its
+    motorway on a viaduct had a junction pad: a box wider than both decks, its railings standing out past their
+    parapets (the user, 2026-10-31, I-95 by the Middle Branch: "right at the start of a split the shoulder lane and
+    barrier can bug out"); the joined slab and the gore nose (roadmesh) make that wedge. Pure."""
+    d = []
+    for line, _z, _h in parts:
+        ln = np.asarray(line, np.float64)[:, :2]
+        s_ = np.r_[0.0, np.cumsum(np.hypot(*np.diff(ln, axis=0).T))]
+        v = ln[min(int(np.searchsorted(s_, 10.0)), len(ln) - 1)] - ln[0]
+        n = float(np.hypot(*v))
+        if n < 1e-6:
+            return False
+        d.append(v / n)
+    for a in range(len(d)):
+        for b in range(a + 1, len(d)):
+            c = float(np.dot(d[a], d[b]))
+            if PAD_FORK_STRAIGHT_COS < c < PAD_FORK_COS:
+                return False
+    return True
+
+
 def deck_pads(decks, ground_roads, box, ground_fn, own=True):
     """[(ring (k, 3), centre (3,), walls [(pts (m, 3), out (m, 2))])] of the junction pads of the joints of decks
     [(fid, spec, xy (k, 2), z (k,))] (the bridge parts round tile box, as bridges.parts gives them) whose joint the box
@@ -6969,6 +6996,8 @@ def deck_pads(decks, ground_roads, box, ground_fn, own=True):
                 d.append(v / max(np.hypot(*v), 1e-9))
             if float(np.dot(d[0], d[1])) < PAD_STRAIGHT_COS:
                 continue                        # (a deck going on straight: its own end, an abutment, no corner)
+        if _fork(parts):
+            continue                            # (a ramp parting from or joining its road: no corner to cut)
         pts = np.ascontiguousarray(np.concatenate([p[0] for p in parts]), np.float64)
         zz = np.ascontiguousarray(np.concatenate([p[1] for p in parts]), np.float64)
         off = np.r_[0, np.cumsum([len(p[0]) for p in parts])].astype(np.int64)

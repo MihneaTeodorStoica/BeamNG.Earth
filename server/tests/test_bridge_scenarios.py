@@ -323,5 +323,20 @@ class RampTieScenarios(unittest.TestCase):
         far = xs > xs[sep] + max(roads.TIE_EASE_MIN_M, (12.0 - ramp_z[sep]) / roads.TIE_EASE_GRADE) + 1
         np.testing.assert_allclose(rz[far], ramp_z[far], err_msg="its own profile past the easing")
 
+
+class ForkPadScenarios(unittest.TestCase):
+    """No junction pad at a ramp's fork from its motorway (a box wider than both decks, its railings standing out: I-95
+    by the Middle Branch); a street junction on a bridge keeps its pad (test_deckjoins)."""
+
+    def test_fork_has_no_pad(self):
+        main_in = np.c_[np.linspace(-120.0, 0.0, 61), np.zeros(61)]
+        main_out = np.c_[np.linspace(0.0, 120.0, 61), np.zeros(61)]
+        ramp = np.c_[np.linspace(0.0, 120.0, 61), -0.12 * np.linspace(0.0, 120.0, 61)]
+        z = np.full(61, 20.0)
+        wide = roads.Spec(width=18.8, kind="paved", urban=False, cls="motorway", oneway=True)
+        link = roads.Spec(width=8.0, kind="paved", urban=False, cls="motorway", oneway=True, link=True)
+        decks = [("a", wide, main_in, z), ("b", wide, main_out, z), ("r", link, ramp, z)]
+        self.assertEqual(roads.deck_pads(decks, [], (-50, -50, 50, 50), lambda xy: np.zeros(len(xy))), [])
+
 if __name__ == "__main__":
     unittest.main()
