@@ -347,5 +347,39 @@ class ForkPadScenarios(unittest.TestCase):
             self.assertLess(d, roads.PAD_FORK_MARGIN_M + 0.6, f"pad point {q} past the decks' edges")
         self.assertTrue(pads[0][2], "a railing round its rim over the drop")
 
+
+class MedianScenarios(unittest.TestCase):
+    """Opposite traffic either side of a median is never one open slab: a median barrier when close, an open gap with
+    each deck's own parapet when wider (I-95 by the Middle Branch); a ramp beside its road still joins."""
+
+    def test_close_opposite_decks_get_a_median_barrier(self):
+        import roadmesh
+        g = np.full(20, 1.5)
+        opp = np.ones(20, bool)
+        ext, cov = roadmesh._opposite(g, opp, *roadmesh._noses(g))
+        self.assertFalse(cov.any(), "a parapet (at the middle)")
+        np.testing.assert_allclose(ext, 1.5 / 2 + 0.05, err_msg="the slab to the gap's middle")
+
+    def test_wide_opposite_decks_stay_apart(self):
+        import roadmesh
+        g = np.full(20, 4.5)
+        ext, cov = roadmesh._opposite(g, np.ones(20, bool), *roadmesh._noses(g))
+        self.assertFalse(cov.any())
+        np.testing.assert_allclose(ext, 0.0, err_msg="no fill: each deck at its own edge, the gap open")
+
+    def test_same_direction_still_joins(self):
+        import roadmesh
+        g = np.full(20, 4.5)
+        ext, cov = roadmesh._opposite(g, np.zeros(20, bool), *roadmesh._noses(g))
+        self.assertTrue(cov.all())
+
+    def test_travel_vectors_oppose(self):
+        import roadmesh
+        x = np.linspace(0, 50, 11)
+        left, right = np.c_[x, np.full(11, 5.0)], np.c_[x, np.zeros(11)]
+        a, b = roadmesh._travel_vec(left, right, 1), roadmesh._travel_vec(left, right, -1)
+        np.testing.assert_allclose(a[0], [1.0, 0.0], atol=1e-9)
+        self.assertTrue(((a * b).sum(1) < -0.5).all())
+
 if __name__ == "__main__":
     unittest.main()

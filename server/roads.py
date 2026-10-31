@@ -214,6 +214,8 @@ PARKING_M = 2.3
 # Overture has no lane counts.
 MOTORWAY_RURAL_M = 7.4
 SHOULDER_M = 2.2
+SHOULDER_WIDE_M = 3.0     # m: a motorway carriageway of SHOULDER_WIDE_LANES lanes or more (US interstates: 10 ft both
+SHOULDER_WIDE_LANES = 3   # sides from three lanes; I-95 by the Middle Branch, the aerial vs ours, the user 2026-10-31)
 PARKING_CLASSES = {"residential", "tertiary", "secondary", "unclassified", "living_street"}
 EDGE_STRIP_M = 1.0
 # ... by class where measured narrower: rural minor roads' paved width on the official aerials (PEMA 6-inch, Lancaster
@@ -1316,7 +1318,7 @@ def carriageway(cls, kind, urban, rule_width=None, oneway=False, lanes=None):
     if kind not in BUILT:
         return w
     if lanes and not urban and oneway and cls == "motorway":
-        return w + 2 * SHOULDER_M
+        return w + 2 * (SHOULDER_WIDE_M if lanes >= SHOULDER_WIDE_LANES else SHOULDER_M)
     if urban and not oneway and cls in URBAN_ARTERIAL and not lanes:
         return URBAN_ARTERIAL[cls]          # four lanes, no parking (a walled street is measured instead)
     if urban and cls in PARKING_CLASSES:
@@ -1344,7 +1346,8 @@ def edge_margin(spec):
 def motorway_shoulder(spec):
     """A rural motorway carriageway's shoulder: SHOULDER_M, or on a ramp (one lane, LINK_M) what one LINK_LANE_M lane
     leaves (GitHub #107: a 6 m ramp's edge lines stood 1.6 m apart, inside the motorway's 2.2 m shoulders)."""
-    return float(np.clip((spec.width - LINK_LANE_M) / 2, EDGE_LINE["inset"], SHOULDER_M))
+    cap = SHOULDER_WIDE_M if (spec.lanes or 0) >= SHOULDER_WIDE_LANES else SHOULDER_M     # (its carriageway's)
+    return float(np.clip((spec.width - LINK_LANE_M) / 2, EDGE_LINE["inset"], cap))
 
 
 def _dir_kmh(feats, i, ncon, lengths=None):
@@ -2034,8 +2037,9 @@ def _bridge_specs(feats, want="bridge"):
         link = _rule_value(rules.get("subclass"), i) == "link"
         if rule_w is None and link and lanes is None:
             rule_w = LINK_M[1] if ow else LINK_M[2]
+        ov = _rule_value(rules.get("oneway"), i)
         sp = Spec(carriageway(cls, kind, False, rule_w, ow, lanes), kind, False, cls, ow, lanes=lanes,
-                  surf=surface_token(surf), link=link)
+                  surf=surface_token(surf), link=link, dir=(-1 if float(ov) < 0 else 1) if ov is not None else 0)
         g = ground[i] if ground is not None else None
         if g is not None and g.median:
             # one carriageway of a divided road (dual_carriageways on its ground specs): its deck one carriageway wide,
@@ -6862,10 +6866,12 @@ DECK_CONTEXT_M = 24.0   # m around a tile its bridges' decks are passed as conte
 
 
 def _deck_look(spec):
-    """A bridge deck's look: the concrete of a `surface=concrete` street (it stays concrete over the bridge), else
-    asphalt — and asphalt for rock/grass surfaces, whose ground mask cannot be painted on a deck at all."""
+    """A bridge deck's look: the concrete of a `surface=concrete` street (it stays concrete over the bridge) or of a
+    motorway's or trunk road's (DECK_CONCRETE_CLASSES), else asphalt — and asphalt for rock/grass surfaces, whose ground mask cannot be painted on a deck at all."""
     if not terrain_surface(spec) and spec.kind == "paved" and spec.surf == "concrete":
         return CONCRETE
+    if spec.kind == "paved" and spec.cls in DECK_CONCRETE_CLASSES:
+        return DECK_CONCRETE
     return DECK
 
 
@@ -7060,12 +7066,19 @@ def pad_inside(pads, xy, shrink=0.3):
 # across the car's path) beside the carriageway.
 DECK_WALK = {"m": "sidewalk_concrete", "tl": 6.0, "p": 16}
 DECK_WALK_LIFT_M = 0.03         # m the strip is drawn over the deck (no z fighting with its asphalt)
-# A motorway's or trunk road's deck: its shoulders concrete beside the asphalt lanes (West Coast USA's interchanges,
-# the I-95 viaduct by the Middle Branch in the aerial; the user, 2026-10-31), from its edge line out (the edge layer:
-# under the lines)
-DECK_SHOULDER = {"m": "m_gm_concrete_plain", "tl": 11.0, "p": 20, "layer": "edge"}
-DECK_SHOULDER_CLASSES = {"motorway", "trunk"}
-DECK_SHOULDER_MIN_M = 0.6
+# A motorway's or trunk road's deck: concrete all across (the I-95 viaduct by the Middle Branch in the aerial: the whole
+# deck pale concrete; the user, 2026-10-31: "the entire real bridge is concrete ... concrete shoulders [alone] don't
+# look good or realistic")
+DECK_CONCRETE_CLASSES = {"motorway", "trunk"}
+DECK_CONCRETE = {"m": "bne_bridge_concrete", "tl": 11.0, "p": 20}   # (the slab's grey: m_gm_concrete_plain was near
+                                                                    # white, the white lane lines lost on it)
+
+
+def _travel(spec):
+    """+1 / -1: a one-way deck's traffic along / against its line, 0 two-way (roadmesh._median_gaps)."""
+    if not spec.oneway:
+        return 0
+    return -1 if getattr(spec, "dir", 0) and spec.dir < 0 else 1
 
 
 def _deck_frame(spec, walk):
@@ -7141,7 +7154,7 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
             for c in split(densify(simplify(piece, ztol=SIMPLIFY_Z_M))):
                 if len(c) >= 2:
                     ch = _chunk({**_deck_look(spec), "deck": True}, dw, c)
-                    ch.update(fixed=True, deck=True, fid=fid, ctx=True)
+                    ch.update(fixed=True, deck=True, fid=fid, ctx=True, tdir=_travel(spec))
                     if depths and fid in depths:
                         ch["dd"] = round(float(depths[fid]), 3)
                     out.append(ch)
@@ -7151,10 +7164,6 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
         for look, w, line in extras(spec, pts, lon, shift=shift_of(fid, pts) if shift_of else None):
             if look["m"] not in (SIDEWALK["m"], GUTTER["m"], EDGE_DECAL["m"]):     # (no ground beside a deck)
                 lines.append((look, w, line))
-        sh = edge_margin(spec) if spec.cls in DECK_SHOULDER_CLASSES and spec.kind == "paved" else 0.0
-        if sh >= DECK_SHOULDER_MIN_M:          # its shoulders concrete (DECK_SHOULDER)
-            for side in (1, -1):
-                lines.append((DECK_SHOULDER, sh, offset_polyline(pts, side * (spec.width / 2 - sh / 2))))
         if walks.get(fid):                      # its sidewalks, flush on the deck beside the carriageway
             wm, sides = walks[fid]
             for side in sides:
@@ -7170,6 +7179,7 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                         if look.get("deck"):
                             ch["deck"] = True
                             ch["fid"] = fid             # (roadmesh.deck: no parapet between parts side by side)
+                            ch["tdir"] = _travel(spec)  # (roadmesh: opposite traffic beside it, a median)
                             if depths and fid in depths:
                                 ch["dd"] = round(float(depths[fid]), 3)     # (roadmesh.deck: its slab and girders)
                             if abut.get(fid):

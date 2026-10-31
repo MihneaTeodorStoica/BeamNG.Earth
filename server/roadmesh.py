@@ -647,7 +647,8 @@ def deck(chunks, origin, piers=(), context=(), beams=(), ground=(), parapets=Non
         lat = left - right
         u = lat / np.maximum(np.hypot(lat[:, 0], lat[:, 1]), 1e-9)[:, None]     # unit left
         wide = 0.0 if c.get("tunnel") else PARAPET_W
-        (xl, cl), (xr, cr_) = _noses(medians[n][0]), _noses(medians[n][1])
+        gl_, gr_, ol_, or_ = medians[n]
+        (xl, cl), (xr, cr_) = _opposite(gl_, ol_, *_noses(gl_)), _opposite(gr_, or_, *_noses(gr_))
         covered[n] = (covered[n][0] | cl, covered[n][1] | cr_)
         # the slab's edges, past the road's (to the middle of a median beside another deck; to a point at a gore nose)
         el = left + u * np.maximum(wide, xl)[:, None]
@@ -886,27 +887,39 @@ def _noses(g):
     return ext, cov
 
 
+def _travel_vec(left, right, tdir):
+    """Per ribbon point its traffic's direction (k, 2): the line's tangent times tdir (+1 / -1; 0 two-way: zeros)."""
+    lat = left - right
+    u = lat / np.maximum(np.hypot(lat[:, 0], lat[:, 1]), 1e-9)[:, None]
+    return np.stack([u[:, 1], -u[:, 0]], 1) * float(tdir or 0)
+
+
 def _median_gaps(rb, context=()):
-    """Per deck ribbon (left, right) the gap (m) from each edge point to the nearest edge of another deck within
-    MEDIAN_JOIN_M at about its height (PARAPET_COVER_DZ), else 0: a median between two carriageways' decks. rb and
-    context: [(ribbon, chunk)]; the context's pieces of the same deck (its fid: the deck going on in the tiles around)
-    are not another deck (they had hidden every median at 0 m)."""
-    edges = []                      # (owner, points (k, 3))
+    """Per deck ribbon (left, right, opposite left, opposite right): the gap (m) from each edge point to the nearest
+    edge of another deck within MEDIAN_JOIN_M at about its height (PARAPET_COVER_DZ), else 0: a median between two
+    carriageways' decks; and whether that deck carries the opposite traffic (both one-way, their chunks' "tdir").
+    rb and context: [(ribbon, chunk)]; the context's pieces of the same deck (its fid: the deck going on in the tiles
+    around) are not another deck (they had hidden every median at 0 m)."""
+    edges = []                      # (owner, points (k, 3), its traffic's direction (k, 2))
     for n, ((left, right, v, m, layer, z), c) in enumerate(rb):
         key = c.get("fid", ("own", n))
-        edges.append((key, np.c_[left, z]))
-        edges.append((key, np.c_[right, z]))
+        tv = _travel_vec(left, right, c.get("tdir", 0))
+        edges.append((key, np.c_[left, z], tv))
+        edges.append((key, np.c_[right, z], tv))
     for k, ((left, right, v, m, layer, z), c) in enumerate(context):
         key = c.get("fid", ("ctx", k))
-        edges.append((key, np.c_[left, z]))
-        edges.append((key, np.c_[right, z]))
+        tv = _travel_vec(left, right, c.get("tdir", 0))
+        edges.append((key, np.c_[left, z], tv))
+        edges.append((key, np.c_[right, z], tv))
     out = []
     for n, ((left, right, v, m, layer, z), c) in enumerate(rb):
         own = c.get("fid", ("own", n))
-        sides = []
+        mine = _travel_vec(left, right, c.get("tdir", 0))
+        sides, opps = [], []
         for E in (np.c_[left, z], np.c_[right, z]):
             g = np.zeros(len(E))
-            for owner, O in edges:
+            opp = np.zeros(len(E), bool)
+            for owner, O, tv in edges:
                 if owner == own or not len(O):
                     continue
                 # (only near ones: a cheap box test first)
@@ -916,18 +929,41 @@ def _median_gaps(rb, context=()):
                     continue
                 d = np.hypot(E[:, None, 0] - O[None, :, 0], E[:, None, 1] - O[None, :, 1])
                 dz = np.abs(E[:, None, 2] - O[None, :, 2])
-                d = np.where(dz < PARAPET_COVER_DZ, d, np.inf).min(1)
+                d = np.where(dz < PARAPET_COVER_DZ, d, np.inf)
+                j = d.argmin(1)
+                d = d[np.arange(len(E)), j]
                 hit = (d < MEDIAN_JOIN_M) & ((g == 0) | (d < g))
                 g = np.where(hit, np.maximum(d, 1e-3), g)
+                opp = np.where(hit, (mine * tv[j]).sum(1) < -0.5, opp)
             sides.append(g)
+            opps.append(opp)
         # (an edge facing away from the other deck is near it too where the decks are narrow: only the nearer edge
         # of the two faces the median)
         gl, gr = sides
         both = (gl > 0) & (gr > 0)
         gl = np.where(both & (gl > gr), 0.0, gl)
         gr = np.where(both & (gr >= sides[0]), 0.0, gr)
-        out.append((_fill_short(gl, MEDIAN_FILL_PTS), _fill_short(gr, MEDIAN_FILL_PTS)))
+        gl, gr = _fill_short(gl, MEDIAN_FILL_PTS), _fill_short(gr, MEDIAN_FILL_PTS)
+        out.append((gl, gr, opps[0] & (gl > 0), opps[1] & (gr > 0)))
     return out
+
+
+# Opposite traffic either side of a median (a divided road's two carriageways on their decks): never one open slab,
+# their traffic meeting across it with nothing between (the I-95 viaduct by the Middle Branch, joined where its two
+# decks came within MEDIAN_JOIN_M; the aerial: two decks, a narrow gap). Up to MEDIAN_BARRIER_M apart the gap is
+# filled and each deck's parapet stands at its middle (back to back: a median barrier); wider, each its own at its own
+# edge, the gap open. The user, 2026-10-31.
+MEDIAN_BARRIER_M = 2.5
+
+
+def _opposite(g, opp, ext, cov):
+    """(ext, cov) of _noses with the points facing opposite traffic (opp) made a median barrier or an open gap."""
+    ext, cov = ext.copy(), cov.copy()
+    near = opp & (g > 0) & (g <= MEDIAN_BARRIER_M)
+    far = opp & (g > MEDIAN_BARRIER_M)
+    ext = np.where(near, g / 2 + 0.05, np.where(far, 0.0, ext))
+    cov = np.where(opp, False, cov)
+    return ext, cov
 
 
 MEDIAN_FILL_PTS = 8     # a median's run of points missing it between two that face it (this many or fewer) faces it too
@@ -1019,9 +1055,12 @@ def parapet_runs(chunks, context=(), _rb=None, ground=(), pads=()):
         lat = left - right
         u = lat / np.maximum(np.hypot(lat[:, 0], lat[:, 1]), 1e-9)[:, None]
         wide = 0.0 if c.get("tunnel") else PARAPET_W
-        (xl, cl), (xr, cr_) = _noses(medians[n][0]), _noses(medians[n][1])
+        gl_, gr_, ol_, or_ = medians[n]
+        (xl, cl), (xr, cr_) = _opposite(gl_, ol_, *_noses(gl_)), _opposite(gr_, or_, *_noses(gr_))
         covered[n] = (covered[n][0] | cl, covered[n][1] | cr_)
-        nose = ((medians[n][0] > 0) & ~cl, (medians[n][1] > 0) & ~cr_)       # (a gore nose's points: _noses)
+        # (full barriers, never the low curb: a gore nose's points, _noses; a median barrier's, _opposite)
+        nose = (((gl_ > 0) & ~cl & ~ol_) | (ol_ & (gl_ <= MEDIAN_BARRIER_M)),
+                ((gr_ > 0) & ~cr_ & ~or_) | (or_ & (gr_ <= MEDIAN_BARRIER_M)))
         if len(pads):               # (none inside a junction pad: roads.deck_pads)
             import roads as _roads
             covered[n] = (covered[n][0] | _roads.pad_inside(pads, left), covered[n][1] | _roads.pad_inside(pads, right))
