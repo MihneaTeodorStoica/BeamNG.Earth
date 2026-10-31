@@ -469,8 +469,9 @@ def build(frame, chunks, elev, origin, lift=0.0, clip=None, follow=False, q=None
 DECK_DEPTH = 1.2        # m of deck slab under the surface
 DECK_SKIN = 0.01        # m the road mesh lies over a deck's top (the decal materials are translucent:
                         # 2026-10-11 a deck topped with road_asphalt_2lane was see-through)
-DECK_TOP = "bne_bridge_concrete"    # the slab's top: plain concrete (a gore, a median, the strip under the parapet:
-                                    # West Coast USA's, the user 2026-10-31; was the stock terrain's asphalt), under the road's own
+DECK_TOP = "bne_bridge_asphalt"     # the slab's top: plain opaque asphalt (the stock terrain's), under the road's own
+                                    # (concrete for a while, 2026-10-31: where trim_overlaps cut the road mesh between
+                                    # two decks it showed as pale triangles in the lanes, Old Keene Mill Road)
 DECK_TOP_TILE_M = 4.0               # m of asphalt a texture tile covers across ...
 DECK_TOP_V = 10.0 / DECK_TOP_TILE_M  # ... and along (v: the road's, 10 m a tile)
 DECK_SIDE = "bne_bridge_concrete"  # the slab, girders, parapets, piers and tunnel tubes: plain concrete (the stock
@@ -657,9 +658,10 @@ def deck(chunks, origin, piers=(), context=(), beams=(), ground=(), parapets=Non
         gl_, gr_, ol_, or_ = medians[n]
         (xl, cl), (xr, cr_) = _opposite(gl_, ol_, *_noses(gl_)), _opposite(gr_, or_, *_noses(gr_))
         covered[n] = (covered[n][0] | cl, covered[n][1] | cr_)
-        # the slab's edges, past the road's (to the middle of a median beside another deck; to a point at a gore nose)
-        el = left + u * np.maximum(wide, xl)[:, None]
-        er = right - u * np.maximum(wide, xr)[:, None]
+        # the slab's edges, past the road's (to the middle of a median beside another deck; to a point at a gore nose),
+        # changing no faster than REACH_SLOPE along it
+        el = left + u * _smooth_reach(np.maximum(wide, xl), left)[:, None]
+        er = right - u * _smooth_reach(np.maximum(wide, xr), right)[:, None]
         L = np.c_[el, z] - origin
         R = np.c_[er, z] - origin
         # (a chunk's "dd": its bridge's slab and girders, roads.deck_depth of its span, split 1.2 : 1.0 as the full deck)
@@ -963,6 +965,25 @@ def _median_gaps(rb, context=()):
 MEDIAN_BARRIER_M = 2.5
 
 
+REACH_SLOPE = 0.35      # m the slab's reach past its road (a median's fill, a nose) may change per m along its edge
+
+
+def _smooth_reach(ext, edge):
+    """ext (per edge point the slab's reach past the road) with no change steeper than REACH_SLOPE along the edge
+    (k, 2): only ever more (a fill ends in a wedge instead of a square end), never less (no hole). The fill to a
+    median's middle came and went with the deck beside it, a 1.2-2.6 m notch each time (11 along Springfield's Old
+    Keene Mill Road, deckedges.py 2026-10-31). Pure."""
+    ext = np.asarray(ext, np.float64).copy()
+    if len(ext) < 2:
+        return ext
+    ds = np.hypot(*np.diff(np.asarray(edge, np.float64)[:, :2], axis=0).T) * REACH_SLOPE
+    for k in range(1, len(ext)):
+        ext[k] = max(ext[k], ext[k - 1] - ds[k - 1])
+    for k in range(len(ext) - 2, -1, -1):
+        ext[k] = max(ext[k], ext[k + 1] - ds[k])
+    return ext
+
+
 def _opposite(g, opp, ext, cov):
     """(ext, cov) of _noses with the points facing opposite traffic (opp) made a median barrier or an open gap."""
     ext, cov = ext.copy(), cov.copy()
@@ -1071,8 +1092,8 @@ def parapet_runs(chunks, context=(), _rb=None, ground=(), pads=()):
         if len(pads):               # (none inside a junction pad: roads.deck_pads)
             import roads as _roads
             covered[n] = (covered[n][0] | _roads.pad_inside(pads, left), covered[n][1] | _roads.pad_inside(pads, right))
-        el = left + u * np.maximum(wide, xl)[:, None]
-        er = right - u * np.maximum(wide, xr)[:, None]
+        el = left + u * _smooth_reach(np.maximum(wide, xl), left)[:, None]
+        er = right - u * _smooth_reach(np.maximum(wide, xr), right)[:, None]
         k = len(z)
         for sgn, edge, inner, cov, nz in ((1, el, left, covered[n][0], nose[0]),
                                           (-1, er, right, covered[n][1], nose[1])):
