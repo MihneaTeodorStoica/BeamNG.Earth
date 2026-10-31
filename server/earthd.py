@@ -6208,6 +6208,12 @@ def main():
     import sampler
     sampler.maybe_start()           # BNGE_SAMPLE=<path>: a sampling profile of this process's threads (debugging)
     import budget
+    try:                            # the settings page's Performance choices (GitHub #529): before the priority and
+        args.nice, chosen = cpupin.apply_player_settings(args.user_dir, args.nice, NICE)    # the cores' split below
+        if chosen:
+            log.info("the settings page: the server on %s", ", ".join(chosen))
+    except Exception as e:          # (the defaults then)
+        log.warning("could not read the settings page's server choices: %s", e)
     if args.nice:
         try:
             # all threads: below the game's main and physics threads (Windows: the "below normal" class)

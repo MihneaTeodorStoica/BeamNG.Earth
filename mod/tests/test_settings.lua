@@ -406,6 +406,17 @@ do
   T.check(st.HIDDEN.updateDismissed, 'updateDismissed: not on the settings page')
 end
 
+-- the world server's share of the CPU (GitHub #529): on the page, the defaults as before (server cpupin.player_settings)
+do
+  local st = require('beamngEarth/settings')
+  T.check(st.SCHEMA.serverCores.kind == 'enum' and st.SCHEMA.serverCores.default == 'auto', 'serverCores: auto by default')
+  T.check(st.SCHEMA.serverPriority.kind == 'enum' and st.SCHEMA.serverPriority.default == 'low', 'serverPriority: low by default')
+  T.check(st.validate('serverCores', '2') == '2' and st.validate('serverPriority', 'normal') == 'normal', 'the choices')
+  local on = {}
+  for _, k in ipairs(st.ORDER) do on[k] = true end
+  T.check(on.serverCores and on.serverPriority, 'both on the settings page')
+end
+
 -- the map holds off the car's controls (the user, 2026-10-21: the controller drove the car behind the map): the stock
 -- groups and every driving action by name
 do
