@@ -96,7 +96,11 @@ def ribbons(chunks, keep_none=False):
             xy, s, z = _resample(p, DRAPE_STEP, keep_vertices=True)
             if len(xy) < 2:
                 continue
-            n = _normals(xy) * (float(c["w"]) / 2)
+            hw = float(c["w"]) / 2
+            if c.get("ws") is not None and len(c["ws"]) == len(p):     # (tapering: roads.deck_width_fn)
+                s0 = np.r_[0.0, np.cumsum(np.hypot(*np.diff(p[:, :2], axis=0).T))]
+                hw = (np.interp(s - s[0], s0, np.asarray(c["ws"], np.float64)) / 2)[:, None]
+            n = _normals(xy) * hw
             out[k] = (xy + n, xy - n, s / float(c.get("tl") or 10.0), c["m"], layer_of(c), z)
             continue
         batch.append(k)

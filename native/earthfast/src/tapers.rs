@@ -6,7 +6,8 @@ use std::collections::HashMap;
 
 /// lonlat (P, 2) of the roads' lines, off (n + 1) into it; attrs (n, 5): width (NaN: no ground spec), class code (< 0:
 /// none), deck at start (0/1), deck at end (0/1), deck width (NaN: no bridge); own (R, 2): (road, fraction along it) of
-/// its own deck's ends inside it (roads taper only where two meet); params: m per m, shortest, longest, share of the road, least change, most turn (deg).
+/// its own deck's ends inside it (roads taper only where two meet); params: m per m, shortest, longest, share of the road, least change, most turn (deg),
+/// and (optional) 1: deck mode, a deck's end meeting another deck's end to end, both tapering to half way (no own rows).
 /// Returns (T, 5): road, lon, lat, width at the joint, length (m), in road order then end 0, end 1, own decks.
 #[pyfunction]
 pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: PyReadonlyArray1<'py, i64>,
@@ -14,6 +15,7 @@ pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
                         params: PyReadonlyArray1<'py, f64>) -> Bound<'py, PyArray2<f64>> {
     let (ll, off, at, own, p) = (lonlat.as_array(), off.as_array(), attrs.as_array(), own.as_array(), params.as_array());
     let (m_per_m, min_l, max_l, share, min_dw, max_turn) = (p[0], p[1], p[2], p[3], p[4], p[5]);
+    let decks = p.len() > 6 && p[6] > 0.5;     // (deck mode: decks meeting decks, at their deck widths)
     let n = off.len().saturating_sub(1);
     let rows = py.allow_threads(|| {
         let mut rows: Vec<[f64; 5]> = Vec::new();
@@ -63,14 +65,14 @@ pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
         let cos_max = max_turn.to_radians().cos();
         let span = |dw: f64, length: f64| (dw * m_per_m).clamp(min_l, max_l).min(share * length);
         for i in 0..n {
-            let w = at[[i, 0]];
+            let w = if decks { at[[i, 4]] } else { at[[i, 0]] };
             if !ok[i] || w.is_nan() {
-                continue;                       // (all deck: it keeps its width)
+                continue;                       // (all deck: it keeps its width; deck mode: no deck)
             }
             for e in 0..2usize {
-                if at[[i, 2 + e]] > 0.5 {
-                    continue;                   // (a deck at its end: its width stands, the other road tapers)
-                }
+                if (at[[i, 2 + e]] > 0.5) != decks {
+                    continue;                   // (a deck at its end: its width stands, the other road tapers; in deck
+                }                               // mode only a deck's end, meeting another deck's)
                 let v = if e == 0 { off[i] as usize } else { off[i + 1] as usize - 1 };
                 let (lon, lat) = (ll[[v, 0]], ll[[v, 1]]);
                 let (hi, length) = leaving(i, e);
@@ -93,6 +95,15 @@ pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
                 }
                 let Some((_, j, ej)) = best else { continue };
                 let deck = !at[[j, 4]].is_nan() && at[[j, 2 + ej]] > 0.5;
+                if decks {
+                    // two decks end to end: both run to half way between their widths
+                    if !deck || meeting > 2 || (w - at[[j, 4]]).abs() < min_dw {
+                        continue;
+                    }
+                    let wj = at[[j, 4]];
+                    rows.push([i as f64, lon, lat, 0.5 * (w + wj), span((w - wj).abs(), length)]);
+                    continue;
+                }
                 let wj = if deck { at[[j, 4]] } else { at[[j, 0]] };
                 if wj.is_nan() || (w - wj).abs() < min_dw {
                     continue;
@@ -108,7 +119,7 @@ pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
             }
         }
         // its own deck on a range of it: the ground either side runs to the deck's width
-        for r in 0..own.nrows() {
+        for r in 0..(if decks { 0 } else { own.nrows() }) {
             let (i, f) = (own[[r, 0]] as usize, own[[r, 1]]);
             if i >= n || !ok[i] {
                 continue;

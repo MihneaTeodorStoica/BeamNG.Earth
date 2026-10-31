@@ -640,6 +640,8 @@ class MapData:
                         cd.layers[layer] = mapgeom.drop_huge(cd.layers[layer], BUILDING_MAX_M2)
                     if layer == "roads":        # (the bridges the map lacks, found when its ranges are first asked)
                         cd.layers[layer].__dict__["_bnge_gradesep"] = gradesep.hook(self, key)
+                        # (its neighbours: a road crossing into one is counted the same in both, roads.lane_flow)
+                        cd.layers[layer].__dict__["_bnge_neighbours"] = gradesep.neighbours_hook(self, key)
                     cd.layers[layer].__dict__["_bnge_cell"] = (str(key), layer, json.dumps(self.versions(),
                                                                                            sort_keys=True))
                 elif "missing" in arrays:

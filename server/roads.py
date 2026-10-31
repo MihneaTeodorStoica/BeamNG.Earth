@@ -1555,10 +1555,10 @@ def road_tapers(feats, urban_fn=None, widths=None, left_hand=False):
     return got
 
 
-def _tapers(feats, specs):
+def _tapers(feats, specs, decks=False):
     """road_tapers' kernel (earthfast.road_tapers): the per-road rows marshalled, the joints found in Rust."""
     import fast
-    fast.require(117, "road_tapers")
+    fast.require(120 if decks else 117, "road_tapers")
     n = len(feats)
     out = [()] * n
     bridge = bridge_specs(feats)
@@ -1594,13 +1594,48 @@ def _tapers(feats, specs):
     rows = fast._ef.road_tapers(np.ascontiguousarray(lonlat, np.float64), off, attrs,
                                 np.asarray(own, np.float64).reshape(-1, 2),
                                 np.array([TAPER_M_PER_M, TAPER_M[0], TAPER_M[1], TAPER_SHARE, TAPER_MIN_DW,
-                                          TAPER_MAX_TURN], np.float64))
+                                          TAPER_MAX_TURN] + ([1.0] if decks else []), np.float64))
     got = {}
     for r in np.asarray(rows):
         got.setdefault(int(r[0]), []).append((float(r[1]), float(r[2]), float(r[3]), float(r[4])))
     for i, t in got.items():
         out[i] = tuple(t)
     return out
+
+
+def deck_tapers(feats):
+    """Per feature: the tapers of its deck where it meets another deck end to end at another width (both run to half
+    way: _tapers' deck mode), as road_tapers. A deck kept its width at such a joint: the I-95 viaduct by the Middle
+    Branch stepped 1.8 m where a 24.0 m deck went on as a 20.4 m one (deckedges.py, the user 2026-10-31). Pure;
+    remembered on feats."""
+    got = feats.__dict__.get("_deck_tapers")
+    if got is None:
+        got = feats.__dict__["_deck_tapers"] = _tapers(feats, road_specs(feats), decks=True)
+    return got
+
+
+def deck_width_fn(frame, cells):
+    """ws_of(fid, pts (k, 2+)) -> per point the width of deck part fid (its bridge spec's, tapered where it meets
+    another deck: deck_tapers of its feature in cells), or None where no taper reaches it."""
+    where = {}
+    for f in cells or ():
+        if f is None:
+            continue
+        for i, fid in enumerate(f.ids.tolist()):
+            where.setdefault(str(fid), (f, i))
+
+    def ws_of(fid, pts):
+        got = where.get(str(fid))
+        if got is None:
+            return None
+        tp = deck_tapers(got[0])[got[1]]
+        bs = bridge_specs(got[0])[got[1]]
+        if not tp or bs is None:
+            return None
+        pts = np.asarray(pts, np.float64)
+        la, lo, _ = frame.enu_to_geodetic(pts[:, 0], pts[:, 1], 0.0)
+        return taper_widths(bs.width, tp, lo, la)
+    return ws_of
 
 
 def taper_widths(width, tapers, lon, lat):
@@ -1634,47 +1669,101 @@ LANE_FLOW_MAX = 8
 
 def lane_flow(feats):
     """Per feature: its lane count found from the one-way roads joined to it (LANE_FLOW_*), None where none was (or the
-    map gives one). Pure; remembered on feats."""
+    map gives one): its home cell's (the cell of its first point, among this cell and the eight around it), solved
+    over that cell and the eight around it (_lane_flow_local). A road crossing a cell's edge had another count in each
+    cell (I-95 by the Middle Branch: 4 lanes, 20.4 m, in one and the default 11.8 m in the other, a 4.3 m step where
+    their tiles met; then 24.0 m against 20.4 m where the 3 x 3 round each saw another stretch of the chain). Pure
+    given the cells; remembered on feats."""
+    got = feats.__dict__.get("_lane_flow_home")
+    if got is not None:
+        return got
+    out = list(_lane_flow_local(feats))
+    me = feats.__dict__.get("_bnge_cell")
+    hook = feats.__dict__.get("_bnge_neighbours")
+    if me is not None and hook is not None:
+        try:
+            near = {f.__dict__["_bnge_cell"][0]: f for f in hook() if f is not None and f.__dict__.get("_bnge_cell")}
+        except Exception as e:          # (this cell's own)
+            log.debug("lane flow: neighbours: %s: %s", type(e).__name__, e)
+            near = {}
+        import mapcells
+        rows = {}
+        for i in range(len(feats)):
+            a = feats.coord_off[feats.ring_off[feats.part_off[i]]]
+            home = str(mapcells.cell_of(float(feats.lonlat[a, 1]), float(feats.lonlat[a, 0])))
+            if home != me[0] and home in near:
+                rows.setdefault(home, []).append(i)
+        for home, idx in rows.items():
+            other = near[home]
+            res = _lane_flow_local(other)
+            pos = {fid: j for j, fid in enumerate(other.ids.tolist())}
+            for i in idx:
+                j = pos.get(feats.ids[i])
+                if j is not None:
+                    out[i] = res[j]
+    feats.__dict__["_lane_flow_home"] = out
+    return out
+
+
+def _lane_flow_local(feats):
+    """lane_flow solved over this cell and the eight around it (mapdata's _bnge_neighbours), per feature of this
+    cell. Remembered on feats."""
     got = feats.__dict__.get("_lane_flow")
     if got is not None:
         return got
     import fast
     fast.require(118, "lane_flow")
-    n = len(feats)
-    out = [None] * n
+    layers = [feats]
+    hook = feats.__dict__.get("_bnge_neighbours")
+    if hook is not None:
+        try:
+            layers += [f for f in hook() if f is not None and len(f)]
+        except Exception as e:          # (this cell alone)
+            log.debug("lane flow: neighbours: %s: %s", type(e).__name__, e)
+    seen, rows = set(), []              # (layer, feature) once per road id, this cell's first
+    for f in layers:
+        ids = f.ids.tolist()
+        for i in range(len(f)):
+            if ids[i] not in seen:
+                seen.add(ids[i])
+                rows.append((f, i))
+    n = len(rows)
+    out = [None] * len(feats)
     if n:
-        starts = feats.coord_off[feats.ring_off[feats.part_off[:-1]]]
-        stops = feats.coord_off[feats.ring_off[feats.part_off[1:]]]
-        off = np.zeros(n + 1, np.int64)
-        off[1:] = np.cumsum(stops - starts)
+        lonlat, off = [], np.zeros(n + 1, np.int64)
+        attrs = np.zeros((n, 4))
+        attrs[:, 1] = np.nan
+        attrs[:, 3] = np.nan
+        dflt = {}                       # class -> its one-way carriageway's lanes when the map gives none
+        for r, (f, i) in enumerate(rows):
+            a = f.coord_off[f.ring_off[f.part_off[i]]]
+            b = f.coord_off[f.ring_off[f.part_off[i + 1]]]
+            lonlat.append(f.lonlat[a:b])
+            off[r + 1] = off[r] + (b - a)
+            cls = f.attrs.get("class")
+            sub = f.attrs.get("subtype")
+            if cls is None or str(cls[i]) not in LANE_FLOW_CLASSES or (sub is not None and str(sub[i]) != "road"):
+                continue
+            v = _rule_value(f.rules.get("oneway"), i)
+            if v is None:
+                continue
+            attrs[r, 0] = -1.0 if float(v) < 0 else 1.0
+            lanes = _osm(f, "lanes", i, *OSM_LANES)
+            if lanes is not None:
+                attrs[r, 1] = float(int(lanes))
+            attrs[r, 2] = 1.0 if _rule_value(f.rules.get("subclass"), i) == "link" else 0.0
+            c = str(cls[i])
+            if c not in dflt:
+                dflt[c] = lane_layout(Spec(carriageway(c, "paved", False, None, True, None), "paved", False, c,
+                                           True))[1]
+            attrs[r, 3] = float(dflt[c])
         if off[-1]:
-            lonlat = np.concatenate([feats.lonlat[a:b] for a, b in zip(starts, stops)])
-            attrs = np.zeros((n, 4))
-            attrs[:, 1] = np.nan
-            attrs[:, 3] = np.nan
-            dflt = {}                       # class -> its one-way carriageway's lanes when the map gives none
-            cls = feats.attrs.get("class")
-            sub = feats.attrs.get("subtype")
-            rules = feats.rules
-            for i in range(n):
-                if cls is None or str(cls[i]) not in LANE_FLOW_CLASSES or (sub is not None and str(sub[i]) != "road"):
-                    continue
-                v = _rule_value(rules.get("oneway"), i)
-                if v is None:
-                    continue
-                attrs[i, 0] = -1.0 if float(v) < 0 else 1.0
-                lanes = _osm(feats, "lanes", i, *OSM_LANES)
-                if lanes is not None:
-                    attrs[i, 1] = float(int(lanes))
-                attrs[i, 2] = 1.0 if _rule_value(rules.get("subclass"), i) == "link" else 0.0
-                c = str(cls[i])
-                if c not in dflt:
-                    dflt[c] = lane_layout(Spec(carriageway(c, "paved", False, None, True, None), "paved", False, c,
-                                               True))[1]
-                attrs[i, 3] = float(dflt[c])
-            got = np.asarray(fast._ef.lane_flow(np.ascontiguousarray(lonlat, np.float64), off, attrs,
+            got = np.asarray(fast._ef.lane_flow(np.ascontiguousarray(np.concatenate(lonlat), np.float64), off, attrs,
                                                 float(LANE_FLOW_MAX)))
-            out = [None if not np.isfinite(x) or attrs[i, 2] > 0.5 else int(x) for i, x in enumerate(got)]
+            for r, (f, i) in enumerate(rows):
+                if f is feats:
+                    x = got[r]
+                    out[i] = None if not np.isfinite(x) or attrs[r, 2] > 0.5 else int(x)
     feats.__dict__["_lane_flow"] = out
     return out
 
@@ -6812,7 +6901,7 @@ def _tunnel_chunks(tunnels, cells, exact, terrain_paint=True):
     return out
 
 
-def _bridge_chunks(frame, bseen, elev, exact, bridges=None, cells=None, walks=None, shift_of=None):
+def _bridge_chunks(frame, bseen, elev, exact, bridges=None, cells=None, walks=None, shift_of=None, width_of=None):
     """The chunks of the bridges crossing the tile box `exact` (deck surfaces flagged "deck", their
     centre / edge lines; every bridge chunk "fixed": its z is the deck's, not the ground's). Deck
     heights: from `bridges` (BridgeProfiles: whole chains, shared by every tile), else from the
@@ -6822,7 +6911,7 @@ def _bridge_chunks(frame, bseen, elev, exact, bridges=None, cells=None, walks=No
                if np.isfinite(z).all()]
         dd = getattr(bridges, "depth_of", None)
         return _deck_chunks(got, exact, bridges._ground, {d[0]: dd(d[0]) for d in got} if dd else None, walks,
-                            shift_of)
+                            shift_of, width_of)
     if not bseen:
         return []
     parts = []                                  # (fid, spec, xy (k, 2), lon)
@@ -6857,7 +6946,7 @@ def _bridge_chunks(frame, bseen, elev, exact, bridges=None, cells=None, walks=No
             import grading
             z = np.maximum(_smooth_pinned(z, DECK_STEP, grading.SIGMA_M), g)
         decks.append((fid, spec, np.c_[xy, z], lon))
-    return _deck_chunks(decks, exact, ground, walks=walks, shift_of=shift_of)
+    return _deck_chunks(decks, exact, ground, walks=walks, shift_of=shift_of, width_of=width_of)
 
 
 DECK_CONTEXT_M = 24.0   # m around a tile its bridges' decks are passed as context (roadmesh.deck: whether an edge has
@@ -7100,6 +7189,7 @@ def pad_inside(pads, xy, shrink=0.3):
 # parapets and collision that much wider, a concrete strip flush on the deck (a raised one would need its own collider
 # across the car's path) beside the carriageway.
 DECK_WALK = {"m": "sidewalk_concrete", "tl": 6.0, "p": 16}
+DECK_WALK_CHAIN = 6              # roads all bridge a deck's sidewalks are looked for along (deck_walks)
 DECK_WALK_LIFT_M = 0.03         # m the strip is drawn over the deck (no z fighting with its asphalt)
 # A motorway's or trunk road's deck: concrete all across (the I-95 viaduct by the Middle Branch in the aerial: the whole
 # deck pale concrete; the user, 2026-10-31: "the entire real bridge is concrete ... concrete shoulders [alone] don't
@@ -7131,46 +7221,68 @@ def _deck_frame(spec, walk):
 
 def deck_walks(feats, i, ground_specs, left_hand=False):
     """(sidewalk width m, sides) a deck of feature i carries, or None: its own ground part's (ground_specs[i]: the
-    tile's road_specs, land cover and all) where that has sidewalks, else those of a road of its class going on from
-    one of its ends (a road all bridge has no ground spec), on the side of the deck they are on. Pure."""
+    tile's road_specs, land cover and all) where that has sidewalks, else those of the nearest road of its class with
+    a ground part going on from it, along a chain of roads all bridge (DECK_WALK_CHAIN at most), on the side of the
+    deck they are on: a deck between two others had none, its neighbours theirs, a 2.5 m step in the bridge's width
+    (Baltimore by the Jones Falls Expressway, deckedges.py 2026-10-31). Pure."""
     gs = ground_specs[i]
     if gs is not None:
         return (float(gs.walk), tuple(walk_sides(gs, left_hand))) if has_sidewalks(gs) else None
-    bs = bridge_specs(feats)[i]
-    if bs is None:
+    bridge = bridge_specs(feats)
+    if bridge[i] is None:
         return None
-    a = feats.coord_off[feats.ring_off[feats.part_off[i]]]
-    b = feats.coord_off[feats.ring_off[feats.part_off[i + 1]]]
-    if b - a < 2:
-        return None
-    mine = {(round(float(feats.lonlat[k, 0]), 6), round(float(feats.lonlat[k, 1]), 6)): e
-            for e, k in ((0, a), (1, b - 1))}
-    best = None
-    for j, sp in enumerate(ground_specs):
-        if j == i or sp is None or sp.cls != bs.cls or not has_sidewalks(sp):
+    cls = bridge[i].cls
+    nodes = {}                                  # rounded end point -> [(feature, 0 | 1)]
+    for j in range(len(feats)):
+        a = feats.coord_off[feats.ring_off[feats.part_off[j]]]
+        b = feats.coord_off[feats.ring_off[feats.part_off[j + 1]]]
+        if b - a < 2:
             continue
-        ja = feats.coord_off[feats.ring_off[feats.part_off[j]]]
-        jb = feats.coord_off[feats.ring_off[feats.part_off[j + 1]]]
-        if jb - ja < 2:
-            continue
-        for ej, k in ((0, ja), (1, jb - 1)):
-            e = mine.get((round(float(feats.lonlat[k, 0]), 6), round(float(feats.lonlat[k, 1]), 6)))
-            if e is None:
-                continue
-            sides = tuple(walk_sides(sp, left_hand))
-            if e == ej:                         # (end to end or start to start: they run opposite ways)
-                sides = tuple(-x for x in sides)
-            if best is None or sp.walk < best[0]:
-                best = (float(sp.walk), sides)
-    return best
+        for e, k in ((0, a), (1, b - 1)):
+            nodes.setdefault((round(float(feats.lonlat[k, 0]), 6), round(float(feats.lonlat[k, 1]), 6)), []).append((j, e))
+    ends = {}
+    for key, lst in nodes.items():
+        for j, e in lst:
+            ends[(j, e)] = key
+    seen, frontier = {i}, [(i, False)]          # (feature, whether its direction runs against i's)
+    for _ in range(DECK_WALK_CHAIN):
+        nxt, best = [], None
+        for k, flip in frontier:
+            for e in (0, 1):
+                key = ends.get((k, e))
+                for j, ej in nodes.get(key, ()) if key is not None else ():
+                    if j in seen:
+                        continue
+                    sp = ground_specs[j]
+                    same_class = (sp or bridge[j]) is not None and (sp or bridge[j]).cls == cls
+                    if not same_class:
+                        continue
+                    jflip = flip ^ (e == ej)    # (end to end or start to start: they run opposite ways)
+                    if sp is not None:
+                        if has_sidewalks(sp):
+                            sides = tuple(walk_sides(sp, left_hand))
+                            if jflip:
+                                sides = tuple(-x for x in sides)
+                            if best is None or sp.walk < best[0]:
+                                best = (float(sp.walk), sides)
+                    elif bridge[j] is not None:
+                        seen.add(j)
+                        nxt.append((j, jflip))
+        if best is not None:
+            return best
+        frontier = nxt
+        if not frontier:
+            break
+    return None
 
 
-def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of=None):
+def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of=None, width_of=None):
     """Deck + line chunks of bridge parts [(fid, spec, pts (k, 3), lon)] clipped to the box `exact`, and their decks
     within DECK_CONTEXT_M of it as "ctx" chunks (not drawn: build_tile's caller hands them to roadmesh.deck).
     ground_fn(xy) -> heights: a part's ends on the ground are its abutments (each deck chunk's "abut" points: the
     parapets ramp down there). walks: {fid: (sidewalk m, sides)} of the decks that carry sidewalks (deck_walks).
-    shift_of(fid, pts): its lane lines' shift at each point (lane_shifts) or None."""
+    shift_of(fid, pts): its lane lines' shift at each point (lane_shifts) or None. width_of(fid, pts): its carriageway's
+    width at each point where it tapers into another deck (deck_width_fn) or None."""
     walks = walks or {}
     out = []
     abut = {}
@@ -7199,6 +7311,9 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                 if len(c) >= 2:
                     ch = _chunk({**_deck_look(spec), "deck": True}, dw, c)
                     ch.update(fixed=True, deck=True, fid=fid, ctx=True, tdir=_travel(spec))
+                    ws = width_of(fid, c) if width_of else None
+                    if ws is not None:          # (tapering into another deck: roadmesh.ribbons' "ws")
+                        ch["ws"] = [round(float(x + dw - spec.width), 3) for x in ws]
                     if ch["m"] == DECK_CONCRETE["m"]:
                         ch["tu"] = round(max(1.0, dw / DECK_CONCRETE_TILE_M), 3)
                     if depths and fid in depths:
@@ -7211,7 +7326,7 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
         pts = shifted[i]
         dw, dc = _deck_frame(spec, walks.get(fid))
         lines = [({**_deck_look(spec), "deck": True}, dw, offset_polyline(pts, dc) if dc else pts)]
-        for look, w, line in extras(spec, pts, lon):
+        for look, w, line in extras(spec, pts, lon, ws=width_of(fid, pts) if width_of else None):
             if look["m"] not in (SIDEWALK["m"], GUTTER["m"], EDGE_DECAL["m"]):     # (no ground beside a deck)
                 lines.append((look, w, line))
         if walks.get(fid):                      # its sidewalks, flush on the deck beside the carriageway
@@ -7231,6 +7346,9 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                         if look.get("deck"):
                             ch["deck"] = True
                             ch["fid"] = fid             # (roadmesh.deck: no parapet between parts side by side)
+                            ws = width_of(fid, c) if width_of else None
+                            if ws is not None:          # (tapering into another deck: roadmesh.ribbons' "ws")
+                                ch["ws"] = [round(float(x + w - spec.width), 3) for x in ws]
                             ch["tdir"] = _travel(spec)  # (roadmesh: opposite traffic beside it, a median)
                             if depths and fid in depths:
                                 ch["dd"] = round(float(depths[fid]), 3)     # (roadmesh.deck: its slab and girders)
@@ -7443,7 +7561,8 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
         if dwk:
             deck_walk[fid] = dwk
     deck_shift = deck_shift_fn(frame, cells, urban_fn, widths, left_hand)   # (a deck at a merge / split)
-    for ch in _bridge_chunks(frame, bseen, elev, (x0, y0, x1, y1), bridges, cells, deck_walk, deck_shift):
+    deck_width = deck_width_fn(frame, cells)    # (a deck tapering into another deck)
+    for ch in _bridge_chunks(frame, bseen, elev, (x0, y0, x1, y1), bridges, cells, deck_walk, deck_shift, deck_width):
         if ch.get("deck"):
             decks_near.append(ch)
         if not ch.get("ctx"):
