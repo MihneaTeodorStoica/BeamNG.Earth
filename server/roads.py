@@ -6870,7 +6870,7 @@ def _deck_look(spec):
     motorway's or trunk road's (DECK_CONCRETE_CLASSES), else asphalt — and asphalt for rock/grass surfaces, whose ground mask cannot be painted on a deck at all."""
     if not terrain_surface(spec) and spec.kind == "paved" and spec.surf == "concrete":
         return CONCRETE
-    if spec.kind == "paved" and spec.cls in DECK_CONCRETE_CLASSES:
+    if DECK_CONCRETE_ON and spec.kind == "paved" and spec.cls in DECK_CONCRETE_CLASSES:
         return DECK_CONCRETE
     return DECK
 
@@ -6954,6 +6954,41 @@ def _fork(parts):
             if PAD_FORK_STRAIGHT_COS < c < PAD_FORK_COS:
                 return False
     return True
+
+
+def deck_shift_fn(frame, cells, urban_fn=None, widths=None, left_hand=False):
+    """shift_of(fid, pts (k, 2+)) -> per point the lateral shift (m, + left) of deck part fid at a merge / split
+    (lane_shifts of its feature in cells, the tile's road specs), or None: one rule for the deck chunks (build_tile)
+    and the junction pads round a tile (deck_pads' callers), so a fork's pad meets its decks."""
+    where = {}
+    for f in cells or ():
+        if f is None:
+            continue
+        for i, fid in enumerate(f.ids.tolist()):
+            where.setdefault(str(fid), (f, i))
+
+    def shift_of(fid, pts):
+        got = where.get(str(fid))
+        if got is None:
+            return None
+        ls = lane_shifts(got[0], urban_fn, widths, left_hand)[got[1]]
+        if not ls:
+            return None
+        pts = np.asarray(pts, np.float64)
+        la, lo, _ = frame.enu_to_geodetic(pts[:, 0], pts[:, 1], 0.0)
+        return shift_at(ls, lo, la)
+    return shift_of
+
+
+def shifted_parts(parts, shift_of):
+    """bridges.parts' (fid, spec, xy, z, lon) with each xy shifted by shift_of (deck_shift_fn)."""
+    out = []
+    for fid, spec, xy, z, lon in parts:
+        sh = shift_of(fid, xy) if shift_of else None
+        if sh is not None:
+            xy = offset_polyline(np.c_[np.asarray(xy, np.float64)[:, :2], np.zeros(len(xy))], sh)[:, :2]
+        out.append((fid, spec, xy, z, lon))
+    return out
 
 
 def deck_pads(decks, ground_roads, box, ground_fn, own=True):
@@ -7073,6 +7108,8 @@ DECK_CONCRETE_CLASSES = {"motorway", "trunk"}
 # the stock highway concrete (West Coast USA's road_concrete: tined, jointed; its square tile two lanes wide), the
 # texture once per DECK_CONCRETE_TILE_M across ("tu") and as long along; the plain slab concrete looked like paving slabs
 DECK_CONCRETE_TILE_M = 7.3
+DECK_CONCRETE_ON = False        # (off: the user, 2026-10-31, "the concrete texture does not look very good ... imperfections
+                                # show up a lot more; switch back to asphalt for now")
 DECK_CONCRETE = {"m": "bne_highway_concrete", "tl": DECK_CONCRETE_TILE_M, "p": 20}
 
 
@@ -7150,7 +7187,12 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                 abut[fid].append((float(q[0]), float(q[1])))
     x0, y0, x1, y1 = exact
     wide = (x0 - DECK_CONTEXT_M, y0 - DECK_CONTEXT_M, x1 + DECK_CONTEXT_M, y1 + DECK_CONTEXT_M)
-    for fid, spec, pts, lon in decks:
+    shifted = {}                                # (the deck itself shifted at a merge / split: lane_shifts)
+    for i, (fid, spec, pts, lon) in enumerate(decks):
+        sh = shift_of(fid, pts) if shift_of else None
+        shifted[i] = offset_polyline(pts, sh) if sh is not None else pts
+    for i, (fid, spec, pts, lon) in enumerate(decks):
+        pts = shifted[i]
         dw, dc = _deck_frame(spec, walks.get(fid))
         for piece in clip_polyline(offset_polyline(pts, dc) if dc else pts, *wide):
             for c in split(densify(simplify(piece, ztol=SIMPLIFY_Z_M))):
@@ -7162,10 +7204,14 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                     if depths and fid in depths:
                         ch["dd"] = round(float(depths[fid]), 3)
                     out.append(ch)
-    for fid, spec, pts, lon in decks:
+    for i, (fid, spec, pts, lon) in enumerate(decks):
+        # at a merge / split the whole deck shifted toward the ramp (its lines with it): the far edge goes straight on
+        # from the narrower part's and the added lane widens it on the ramp's side alone; centred on its line it
+        # stepped out both sides (the I-95 viaduct by the Middle Branch against the aerial, the user 2026-10-31)
+        pts = shifted[i]
         dw, dc = _deck_frame(spec, walks.get(fid))
         lines = [({**_deck_look(spec), "deck": True}, dw, offset_polyline(pts, dc) if dc else pts)]
-        for look, w, line in extras(spec, pts, lon, shift=shift_of(fid, pts) if shift_of else None):
+        for look, w, line in extras(spec, pts, lon):
             if look["m"] not in (SIDEWALK["m"], GUTTER["m"], EDGE_DECAL["m"]):     # (no ground beside a deck)
                 lines.append((look, w, line))
         if walks.get(fid):                      # its sidewalks, flush on the deck beside the carriageway
@@ -7396,16 +7442,7 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
         dwk = deck_walks(bf, bi, road_specs(bf, urban_fn, widths, left_hand), left_hand)
         if dwk:
             deck_walk[fid] = dwk
-    def deck_shift(fid, pts):                   # (a deck's lane lines at a merge / split: lane_shifts)
-        if fid not in bseen:
-            return None
-        bf, bi, _ = bseen[fid]
-        ls = lane_shifts(bf, urban_fn, widths, left_hand)[bi]
-        if not ls:
-            return None
-        pts = np.asarray(pts, np.float64)
-        sla, slo, _ = frame.enu_to_geodetic(pts[:, 0], pts[:, 1], 0.0)
-        return shift_at(ls, slo, sla)
+    deck_shift = deck_shift_fn(frame, cells, urban_fn, widths, left_hand)   # (a deck at a merge / split)
     for ch in _bridge_chunks(frame, bseen, elev, (x0, y0, x1, y1), bridges, cells, deck_walk, deck_shift):
         if ch.get("deck"):
             decks_near.append(ch)

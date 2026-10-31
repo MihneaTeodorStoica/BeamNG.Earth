@@ -1608,6 +1608,8 @@ class Server:
         if anchor.bridges is not None:  # (the junction pads round the tile: roads.deck_pads)
             try:
                 pad_parts = list(anchor.bridges.parts(cells, (box[0] - 40, box[1] - 40, box[2] + 40, box[3] + 40)))
+                pad_parts = roadsmod.shifted_parts(pad_parts, roadsmod.deck_shift_fn(
+                    anchor.frame, cells, urban, self.road_widths, self.left_hand(anchor)))
                 pads_near = roadsmod.deck_pads([(f, sp, xy, z) for f, sp, xy, z, _lon in pad_parts], near_roads, box,
                                                anchor.bridges._ground, own=False)
             except Exception as ex:
