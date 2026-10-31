@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 /// lonlat (P, 2) of the roads' lines, off (n + 1) into it; attrs (n, 5): width (NaN: no ground spec), class code (< 0:
 /// none), deck at start (0/1), deck at end (0/1), deck width (NaN: no bridge); own (R, 2): (road, fraction along it) of
-/// its own deck's ends inside it; params: m per m, shortest, longest, share of the road, least change, most turn (deg).
+/// its own deck's ends inside it (ground roads taper where two meet, at a deck anywhere); params: m per m, shortest, longest, share of the road, least change, most turn (deg).
 /// Returns (T, 5): road, lon, lat, width at the joint, length (m), in road order then end 0, end 1, own decks.
 #[pyfunction]
 pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off: PyReadonlyArray1<'py, i64>,
@@ -76,7 +76,9 @@ pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
                 let (hi, length) = leaving(i, e);
                 let Some(hi) = hi else { continue };
                 let mut best: Option<(f64, usize, usize)> = None;
+                let mut meeting = 0usize;
                 if let Some(list) = ends.get(&key(lon, lat)) {
+                    meeting = list.len();
                     for &(j, ej) in list {
                         if j == i || at[[j, 1]] != at[[i, 1]] {
                             continue;
@@ -94,6 +96,9 @@ pub fn road_tapers<'py>(py: Python<'py>, lonlat: PyReadonlyArray2<'py, f64>, off
                 let wj = if deck { at[[j, 4]] } else { at[[j, 0]] };
                 if wj.is_nan() || (w - wj).abs() < min_dw {
                     continue;
+                }
+                if !deck && meeting > 2 {
+                    continue;                   // (a junction: the width changes across it, as real streets do)
                 }
                 let target = if deck { wj } else { 0.5 * (w + wj) };
                 rows.push([i as f64, lon, lat, target, span((w - wj).abs(), length)]);

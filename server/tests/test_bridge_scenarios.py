@@ -139,6 +139,8 @@ class LaneTaperScenarios(unittest.TestCase):
         self.assertEqual(list(roads.road_tapers(chain([10.0, 10.2]))), [(), ()], "under TAPER_MIN_DW: as before")
         f = chain([10.0], extra=[([(0.0, 0.0), (0.0, 200.0)], "primary")])      # a side road from its end, at 90 deg
         self.assertEqual(roads.road_tapers(f)[0], (), "a junction's arm is not a continuation")
+        f = chain([10.0, 16.0], extra=[([(0.0, 0.0), (0.0, 200.0)], "residential")])
+        self.assertEqual(list(roads.road_tapers(f))[:2], [(), ()], "across a junction: as real streets, no taper")
         f = chain([10.0, 16.0], classes=["primary", "secondary"])
         self.assertEqual(roads.road_tapers(f)[0], (), "another class: a junction, not the same road")
 

@@ -1530,7 +1530,8 @@ def road_specs(feats, urban_fn=None, widths=None, left_hand=False):
 # splits its ways where the lane count changes) or onto its own deck (a city street's parking lanes end at its bridge),
 # what is drawn of it (markings, curbs and sidewalks, the ground's paint) runs to the width at the joint over
 # TAPER_M_PER_M per metre of change instead of stepping there: half way between two ground roads, the deck's own
-# width at a deck (a deck keeps its width: its parapets and collision). MUTCD 3B.09's lane-shift taper is about 50 m a
+# width at a deck (a deck keeps its width: its parapets and collision). Two ground roads only where they alone meet:
+# across a junction the width changes as real streets' do (its curbs and crosswalks are at each road's width). MUTCD 3B.09's lane-shift taper is about 50 m a
 # 3.6 m lane at 45 mph (L = WS).
 TAPER_M_PER_M = 12.0
 TAPER_M = (15.0, 90.0)          # m: a taper's length at the least and most ...
