@@ -100,6 +100,18 @@ class CurveProfile(unittest.TestCase):
                         self.assertGreater(z[at - 1], 0.0, "the lift is eased before the peak")
                         self.assertGreater(z[at + 1], 0.0, "the lift is eased after the peak")
 
+    def test_lift_preserves_existing_deck_clearance_at_mapped_stations(self):
+        s = np.r_[np.arange(0.0, 201.0, 4.0), 200.5]
+        # The first crest is already solved, e.g. for a road beneath it.
+        z = np.maximum(1.0 - np.abs(s - 100.0) / 20.0, 0.0)
+        floor = np.full(len(s), -1.0)
+        floor[s == 180.0] = 0.1
+        got = roads._lift_smooth(s, z, floor)
+        self.assertGreaterEqual(got[s == 100.0][0], 1.0)
+        self.assertTrue(np.all(got >= z - 1e-10))
+        self.assertGreaterEqual(got[s == 180.0][0], 0.1 - 1e-10)
+        np.testing.assert_allclose(got[[0, -1]], z[[0, -1]], atol=1e-10)
+
     def test_water_span_clearance(self):
         ln = line(0, 1000, 4.0)
 

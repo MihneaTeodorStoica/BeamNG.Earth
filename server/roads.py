@@ -3489,26 +3489,28 @@ def _lift_smooth(s, z, floor, iters=8):
     lo = np.where(at_right, hi, left)
     hi = np.where(at_left, left, hi)
     want = np.maximum(fg - zg, 0.0)
-    source_want = np.maximum(fs[1:-1] - np.interp(source, g, zg), 0.0)
+    source_want = np.maximum(fs[1:-1] - z[1:-1], 0.0)
     np.maximum.at(want, lo, source_want)
     np.maximum.at(want, hi, source_want)
-    zz = zg
+    addition = np.zeros_like(zg)
     for _ in range(iters):
         cone = _tents(g, np.where(inner, want, -np.inf), LIFT_GRADE)
         tgt = np.maximum(cone, 0.0)
         ext = np.r_[np.full(r, tgt[0]), tgt, np.full(r, tgt[-1])]
-        zz = zg + np.convolve(ext, np.ones(2 * r + 1) / (2 * r + 1), mode="valid")
-        zz[0], zz[-1] = zg[0], zg[-1]
+        addition = np.convolve(ext, np.ones(2 * r + 1) / (2 * r + 1), mode="valid")
+        addition[0], addition[-1] = 0.0, 0.0
+        zz = zg + addition
         short = np.where(inner, fg - zz, 0.0)
-        source_short = np.maximum(fs[1:-1] - np.interp(source, g, zz), 0.0)
+        source_short = np.maximum(fs[1:-1] - z[1:-1] - np.interp(source, g, addition), 0.0)
         if max(short.max(), source_short.max()) <= 0.01:
             break
         increase = np.maximum(short, 0.0)
         np.maximum.at(increase, lo, source_short)
         np.maximum.at(increase, hi, source_short)
         want += increase
-    zg = zz
-    out = np.interp(s, g, zg)
+    # Interpolate only the lift: resampling the solved profile itself could
+    # lower an existing peak and lose its clearance at a mapped station.
+    out = z + np.interp(s, g, addition)
     out[0], out[-1] = z[0], z[-1]
     ff = np.maximum(fs, np.interp(s, g, fg))
     out[1:-1] = np.maximum(out[1:-1], ff[1:-1])
