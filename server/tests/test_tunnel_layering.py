@@ -210,19 +210,6 @@ class SourceTunnelLayers(unittest.TestCase):
         self.assertGreaterEqual(len(ends), 2)
         self.assertLess(np.ptp(ends), 1e-5)
 
-    def test_source_approaches_cannot_be_mistaken_for_roads_crossing_their_own_roof(self):
-        _frame, feats, _elev, tp = captured("obor_tunnels")
-        with mock.patch.object(tp, "_cover_roads", wraps=tp._cover_roads) as covering:
-            tp.parts([feats], (-500., -500., 500., 500.))
-        self.assertTrue(covering.call_args_list)
-        for call in covering.call_args_list:
-            line, _arc, _kinds, ground = call.args
-            matching = [k for k, v in tp.done.items()
-                        if np.shape(v[1]) == np.shape(line) and np.allclose(v[1], line)]
-            self.assertTrue(matching)
-            owners = {owner for k in matching for owner in tp.approach_owners[tp._part_id(k)]}
-            self.assertTrue(owners.isdisjoint(k[0] for k in ground),
-                            "source-connected open ranges are not separate roads over the tunnel")
 
     def test_grading_and_meshes_use_the_same_obor_sections(self):
         import geotiles

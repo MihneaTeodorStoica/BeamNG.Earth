@@ -21,6 +21,8 @@ What changed in each release of BeamNG.Earth, newest first.
   failures even beside matching saved places.
 - Protect all occupied local-player vehicles, including sparse split-screen seats, from AI recycling,
   pool deactivation and far-car removal.
+- Replan manual GPS after sustained wrong-way progress along a route, and require route-distance
+  arrival so guidance does not stop before the final turns (#623).
 
 ## 1.7.3 beta (2026-10-30)
 
