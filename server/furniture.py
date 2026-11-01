@@ -653,7 +653,9 @@ def place(roads, walks, box, curb_h=0.15, wires=None, town=False, left_hand=Fals
                     rows.append([group, round(float(q[0]), 2), round(float(q[1]), 2), round(float(p[2] + curb_h), 2),
                                  round(yaw_fn(out), 1), 1.0, height, 0.0])
         rule = spacing_of.get(spec.cls)
-        if town and spec.cls in TOWN_POLE_CLASSES and overhead(fid):
+        # (none along a mountain pass road: no line follows the Stelvio's hairpins, Mapillary 2026-10-31; nor the
+        # country roads' below)
+        if town and spec.cls in TOWN_POLE_CLASSES and overhead(fid) and not getattr(spec, "mountain", False):
             # towns and suburbs: wooden utility poles along one side, wired, a cobra-head lamp on every other
             pole_side = 1 if _h01(fid, "side") < 0.5 else -1
             if side == pole_side:
@@ -715,7 +717,8 @@ def place(roads, walks, box, curb_h=0.15, wires=None, town=False, left_hand=Fals
         lamps = lighting.get(fid) != "no" and (highway or lighting.get(fid) == "yes"
                                                 or (spec.urban and spec.cls in TOWN_POLE_CLASSES))
         highway = highway and lamps
-        poles = not highway and overhead(fid) and (lamps or (not spec.urban and spec.cls in POLE_CLASSES))
+        poles = not highway and overhead(fid) and (lamps or (not spec.urban and spec.cls in POLE_CLASSES)) \
+            and not getattr(spec, "mountain", False)        # (a pass road's: none, as in town above)
         if not (lamps or poles):
             continue
         side = 1 if _h01(fid, "pside") < 0.5 else -1

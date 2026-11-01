@@ -688,6 +688,19 @@ function M.onGeoTile(msg, currentAnchor, a)
       for w in pairs(msg.slots) do slotDrop(msgSlot(msg, w)) end
     end
     old.anchor, old.orphan = currentAnchor, nil
+    -- (its furniture and guard rails again where trees.lua has them no more: a disconnect clears them all, trees.clear;
+    -- the poles near the car were gone after a server restart, their wires, part of the tile, still up: the Stelvio,
+    -- 2026-10-31)
+    local T = require('beamngEarth/trees')
+    if type(data.props) == 'table' and type(data.props.items) == 'table' and not T.hasGeo('p' .. old.gkey) then
+      T.onGeoRows('p' .. old.gkey, old.gkey, data.props.items, data.props.groups, nil, old.frame, old.rowPivot or 0,
+        old.anchorObj)
+    end
+    if type(data.guardrails) == 'table' and type(data.guardrails.items) == 'table' and #data.guardrails.items > 0
+        and not T.hasGeo('g' .. old.gkey) then
+      T.onGeoRows('g' .. old.gkey, old.gkey, data.guardrails.items, data.guardrails.groups, 17, old.frame,
+        old.rowPivot or 0, old.anchorObj)
+    end
     M.geoStats.kept = M.geoStats.kept + 1
     return true
   end

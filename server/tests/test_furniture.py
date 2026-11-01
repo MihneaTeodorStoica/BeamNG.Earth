@@ -70,6 +70,21 @@ class LampTest(unittest.TestCase):
         self.assertGreaterEqual(groups.count(furniture.G_POLELAMP), 2)
         self.assertTrue(wires)
 
+    def test_no_poles_along_a_mountain_pass_road(self):
+        """A pass road (roads.Spec.mountain, the Stelvio): no utility poles nor wires, as a road in the hills
+        without the flag has them."""
+        fid, spec, pts, lon = road("m", "secondary", False)
+        rows, wires = [], []
+        for sp in (spec, spec._replace(mountain=True)):
+            got, w = [], []
+            for side in (1, -1):
+                got += furniture.place([(fid, sp, pts, lon)], self.walks((fid, sp, pts, lon), side), (0, 0, 256, 256),
+                                       wires=w, town=True)
+            rows.append([x[0] for x in got].count(furniture.G_POLE))
+            wires.append(len(w))
+        self.assertGreater(rows[0], 0)
+        self.assertEqual((rows[1], wires[1]), (0, 0))
+
     def test_hydrants_on_town_streets(self):
         r = road("h", "residential", True, x0=-300, x1=900)
         rows = []

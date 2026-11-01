@@ -357,6 +357,8 @@ end
 -- Pure: the n-th pool Forest's name.
 -- (tests: .claude/devtools/floattrees.py reads the tiles' made items and their Forests' transforms)
 function M.debugTiles() return tiles end
+-- Does geotile tileKey (onGeoRows' key: 'p' / 'g' .. its geotile key) have its rows here?
+function M.hasGeo(tileKey) return tiles['g:' .. tostring(tileKey)] ~= nil end
 
 function M.forestName(n)
   return M.FOREST_NAME .. '_' .. tostring(n)
