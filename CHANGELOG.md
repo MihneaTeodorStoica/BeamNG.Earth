@@ -2,6 +2,14 @@
 
 What changed in each release of BeamNG.Earth, newest first.
 
+## Unreleased
+
+- Check full roadside-object colliders against the generated carriageways and stacked bridge decks,
+  including their actual widths, shifts and structural depths. Keep lamps, signs and pylons out of
+  traffic while retaining safe under-bridge fixtures and uninterrupted overhead conductors.
+- Reuse the same road-clearance context for static furniture, switchable traffic lights and pylons,
+  including context beyond tile boundaries.
+
 ## 1.7.3 beta (2026-10-30)
 
 > **Join the TGForever Discord, [discord.gg/tgf](https://discord.gg/tgf), to chat, get help, report bugs or help
