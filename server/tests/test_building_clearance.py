@@ -88,6 +88,35 @@ class RoadCorridorTest(unittest.TestCase):
             self.assertGreater(len(walls), 0)
             self.assertGreaterEqual(((walls[:, :, :2] - a) @ normal).min(), half - 1e-6)
 
+    def test_narrowed_taper_does_not_shave_a_clear_roadside_wall(self):
+        # The source way is 12 m wide away from its 4 m continuation; at their joint it tapers to 8 m.
+        f = features([[(-200, 100), (-100, 100), (-20, 100), (0, 100)],
+                      [(0, 100), (200, 100)]], ["primary", "primary"], widths=[(0, 12), (1, 4)])
+        flat = lambda la, lo: np.zeros(np.shape(la))
+        corridors = bld.road_corridors(FRAME, [f], -256, 0, flat)
+        self.assertEqual(len(corridors), 2)
+        xy, z, widths = corridors[0]
+        self.assertEqual(roads.road_specs(f)[0].width, 12)
+        self.assertGreater(widths[-1], 8)
+        self.assertLess(widths[-1], 9)
+        a, b = xy[-2:]
+        u = (b - a) / np.linalg.norm(b - a)
+        normal = np.array([-u[1], u[0]])
+        p = a + 2 * u + 5 * normal
+        ring = np.array([p, p + 12 * u, p + 12 * u + 10 * normal, p + 10 * normal, p])
+        la, lo, _ = FRAME.enu_to_geodetic(ring[:, 0] - 256, ring[:, 1], 0)
+        layer = Feats(["house"], [np.column_stack([lo, la])], **{"class": ["house"],
+                      "height": [10.], "roof_shape": ["flat"]})
+        args = (FRAME, -256, 0, 0, 256, [layer], flat)
+        narrowed = bld.tile_buildings(*args, roads_xy=[xy], corridors=corridors)
+        nominal = bld.tile_buildings(*args, roads_xy=[xy], corridors=[(xy, z, 12)])
+        self.assertEqual(len(narrowed), 1)
+        self.assertEqual(len(nominal), 1)
+        self.assertFalse(narrowed[0][0].road_trimmed, "a wall 5 m from the centre clears an 8 m road")
+        self.assertTrue(nominal[0][0].road_trimmed, "the nominal 12 m width would shave this wall to 6 m")
+        self.assertAlmostEqual(float(((narrowed[0][0].ring - a) @ normal).min()), 5, delta=0.01)
+        self.assertAlmostEqual(float(((nominal[0][0].ring - a) @ normal).min()), 6, delta=0.01)
+
     def test_development_ship_and_quay_meshes_keep_their_geometry(self):
         import ships
         ring = rect(20, 42, 14, 16)
