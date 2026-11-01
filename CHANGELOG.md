@@ -2,6 +2,11 @@
 
 What changed in each release of BeamNG.Earth, newest first.
 
+## Unreleased
+
+- Render explicitly mapped tram bridges as narrow concrete decks with embedded rails, including their
+  collision surfaces. Keep ground-level tram tracks and excluded underground metro lines unchanged.
+
 ## 1.7.3 beta (2026-10-30)
 
 > **Join the TGForever Discord, [discord.gg/tgf](https://discord.gg/tgf), to chat, get help, report bugs or help
