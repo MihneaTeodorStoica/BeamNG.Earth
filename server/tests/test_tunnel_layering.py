@@ -210,15 +210,35 @@ class SourceTunnelLayers(unittest.TestCase):
         self.assertGreaterEqual(len(ends), 2)
         self.assertLess(np.ptp(ends), 1e-5)
 
+    def test_source_approaches_cannot_be_mistaken_for_roads_crossing_their_own_roof(self):
+        _frame, feats, _elev, tp = captured("obor_tunnels")
+        with mock.patch.object(tp, "_cover_roads", wraps=tp._cover_roads) as covering:
+            tp.parts([feats], (-500., -500., 500., 500.))
+        self.assertTrue(covering.call_args_list)
+        for call in covering.call_args_list:
+            line, _arc, _kinds, ground = call.args
+            matching = [k for k, v in tp.done.items()
+                        if np.shape(v[1]) == np.shape(line) and np.allclose(v[1], line)]
+            self.assertTrue(matching)
+            owners = {owner for k in matching for owner in tp.approach_owners[tp._part_id(k)]}
+            self.assertTrue(owners.isdisjoint(k[0] for k in ground),
+                            "source-connected open ranges are not separate roads over the tunnel")
+
     def test_grading_and_meshes_use_the_same_obor_sections(self):
-        frame, feats, elev, tp = captured("obor_tunnels")
+        import geotiles
+        _capture_frame, feats, elev, _tp = captured("obor_tunnels")
         feats = selected(feats, (*OBOR, "6d3cc7e9-7354-45d6-80f8-0085c3572f69"))
-        tp = roads.TunnelProfiles(frame, lambda key: feats, elev)
-        tp.raw = elev
+        # Real consumers use PLAN_Z and CHAIN_Z frames, not a TunnelProfiles in the
+        # same artificial frame on both sides (which missed two samples of portal drift).
+        frame = geotiles.region_frame(*geotiles.region_of(44.4499, 26.1244))
+        def setup(profile):
+            profile.raw = elev
+        chains = roads.ChainStore(roads.TunnelProfiles, lambda _key: feats, elev, setup)
+        tp = roads.ChainView(chains, frame)
         from types import SimpleNamespace
         planner = grading._Planner(frame, SimpleNamespace(cell=lambda *a, **kw: SimpleNamespace(layers={"roads": feats})), elev)
         secs = planner._tunnel_sections(feats)
-        closed = tp.parts([feats], (-500, -500, 500, 500))
+        closed = tp.parts([feats], (-np.inf, -np.inf, np.inf, np.inf))
         for source in OBOR:
             expected = [p for p in closed if p[0].startswith(source + ".")]
             actual = [s for s in secs if s[0].startswith(source + ".") and s[4]]
@@ -227,6 +247,15 @@ class SourceTunnelLayers(unittest.TestCase):
                 np.testing.assert_allclose(a[2], b[2], atol=1e-6)
                 measured = frame.enu_to_geodetic(b[2][:, 0], b[2][:, 1], b[3])[2]
                 np.testing.assert_allclose(a[3], measured, atol=1e-6)
+        opened = tp.open_parts([feats], (-np.inf, -np.inf, np.inf, np.inf))
+        for fid, _spec, xy, z, _lon in opened:
+            actual = [s for s in secs if s[0] == fid.split("#")[0] and s[4] == 0]
+            found = [s for s in actual if np.linalg.norm(s[2][0] - xy[0]) < 1e-5 and
+                     np.linalg.norm(s[2][-1] - xy[-1]) < 1e-5]
+            self.assertEqual(len(found), 1, f"planner and ChainView disagree on open mouth {fid}")
+            np.testing.assert_allclose(found[0][2], xy, atol=1e-6)
+            expected = frame.enu_to_geodetic(xy[:, 0], xy[:, 1], z)[2]
+            np.testing.assert_allclose(found[0][3], expected, atol=1e-6)
 
 
 class SourceJointAndApproach(unittest.TestCase):

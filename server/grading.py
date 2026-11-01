@@ -2091,32 +2091,41 @@ class _Planner:
         per-cell DEM-hull classifier here: it dug Obor's surface crossing into the tunnel.
         """
         load = lambda ck: self.md.cell(ck, layers=("roads",), kind="demand").layers.get("roads")
-        tunnels = roadsmod.TunnelProfiles(self.frame, load, self.elev)
-        tunnels.raw, tunnels.wet = self.elev, self.wet
+        ends = None
         if road_plans:
             pack = PlanPack(list(road_plans))
 
             def ends(la, lo):
                 e, n, _ = self.frame.geodetic_to_enu(la, lo, 0.0)
                 return grade_points(np.asarray(e), np.asarray(n), np.asarray(self.elev(la, lo)), pack)
-            tunnels.ends = ends
-        whole = roadsmod.BridgeProfiles.parts(tunnels, [feats], (-np.inf, -np.inf, np.inf, np.inf))
-        out, mouths = [], {}
-        for fid, spec, xy, z, _lon in whole:
-            if tunnels._drowned.get(fid) or not np.isfinite(z).all():
-                continue
-            for n, (a, b, kind) in enumerate(tunnels.sections.get(fid, ())):
-                if b <= a:
+        def setup(tunnels):
+            tunnels.raw, tunnels.wet, tunnels.ends = self.elev, self.wet, ends
+
+        # A planning-region frame is not the chain's frame. Even the same source points
+        # densify differently there, and crossing-cover rounding moved Obor's mouth by two
+        # samples. Use exactly ChainStore's region and source-chain owner selection.
+        # This local store's endpoint callback uses the current uncommitted road plans,
+        # never Grader.apply: asking the production store here would re-enter cell planning.
+        chains = roadsmod.ChainStore(roadsmod.TunnelProfiles, load, self.elev, setup)
+        view = roadsmod.ChainView(chains, self.frame)
+        out, mouths, owners = [], {}, {}
+        for _region, (tunnels, todo) in sorted(view._todo([feats], (-np.inf, -np.inf, np.inf, np.inf)).items()):
+            whole = roadsmod.BridgeProfiles.parts_todo(tunnels, todo)
+            for fid, spec, xy, z, _lon in view._map(tunnels, whole):
+                if tunnels._drowned.get(fid) or not np.isfinite(z).all():
                     continue
-                px, pz = np.asarray(xy)[a:b + 1], np.asarray(z)[a:b + 1]
-                # Plans store geodetic heights; tube vertices store this frame's local up.
-                # Keeping that distinction matters far from the planning-region origin.
-                pz = np.asarray(self.frame.enu_to_geodetic(px[:, 0], px[:, 1], pz)[2], np.float64)
-                out.append((fid, spec, px, pz, kind))
-                mouths[self._tunnel_section_key(fid, px)] = tunnels.mouth(f"{fid}#{n}") if kind else (False, False)
+                for n, (a, b, kind) in enumerate(tunnels.sections.get(fid, ())):
+                    if b <= a:
+                        continue
+                    px, pz = np.asarray(xy)[a:b + 1], np.asarray(z)[a:b + 1]
+                    # Plans store geodetic heights; mapped tube vertices store local up.
+                    pz = np.asarray(self.frame.enu_to_geodetic(px[:, 0], px[:, 1], pz)[2], np.float64)
+                    out.append((fid, spec, px, pz, kind))
+                    mouths[self._tunnel_section_key(fid, px)] = tunnels.mouth(f"{fid}#{n}") if kind else (False, False)
+            owners.update(tunnels.approach_owners)
         with self.lock:
             self.__dict__.setdefault("_tunnel_mouths", {}).update(mouths)
-            self.__dict__.setdefault("_tunnel_owners", {}).update(tunnels.approach_owners)
+            self.__dict__.setdefault("_tunnel_owners", {}).update(owners)
         return out
 
     @staticmethod

@@ -5908,6 +5908,10 @@ class TunnelProfiles(BridgeProfiles):
         paths = [order] if order is not None else [[(i, False)] for i in range(len(lines))]
         branched = order is None
         out, inferred = {}, set()
+        own = {source for k in comp for source in self.approach_owners.get(self._part_id(k), {k[0]})}
+        # The source approach is the same road, never a surface crossing over itself.
+        # Collinear overlaps have frame-dependent tiny determinants in crossing tests.
+        surface = {gk: lns for gk, lns in ground.items() if gk[0] not in own}
         for order in paths:
             points, maps, offset = [], {}, 0
             for i, reverse in order:
@@ -5935,22 +5939,21 @@ class TunnelProfiles(BridgeProfiles):
             # Only a mapped bore can grow a roof. Its source's ground ranges stay approaches.
             kinds[~mapped] = 0
             crossings = []
-            own = {comp[i][0] for i, _ in order}
-            for gk, lns in ground.items():
-                if gk[0] in own or gk not in self._hw:
+            for gk, lns in surface.items():
+                if gk not in self._hw:
                     continue
                 for ln in lns:
                     for _pi, arc, _point in _crossings([xy], [ln]):
                         reach = (self._hw[gk] + TUNNEL_ROAD_CLEAR_M) / TUNNEL_ROAD_MIN_SIN
                         crossings.append((arc - reach, arc + reach))
-            kinds = self._cover_roads(xy, s, kinds, ground)
+            kinds = self._cover_roads(xy, s, kinds, surface)
             old_floor = floor
             floor, kinds = mapped_tunnel_floor(s, floor, kinds, mapped, crossings)
             if np.any(old_floor - floor > 1e-6):
                 # Moving a portal to clear a surface carriageway moves the underground
                 # floor constraint with it. Growing only the roof exposed it above Perth's
                 # eastern road and left terrain triangles inside the covered tube.
-                kinds = self._cover_roads(xy, s, kinds, ground)
+                kinds = self._cover_roads(xy, s, kinds, surface)
                 kinds = _inferred_cover(kinds, mapped & (old_floor - floor > 1e-6))
                 grown_floor, _ = mapped_tunnel_floor(s, old_floor, np.zeros(len(s), np.int64),
                                                      kinds == 2, crossings)
@@ -5981,7 +5984,7 @@ class TunnelProfiles(BridgeProfiles):
                             continue
                         g, floor, kinds = out[comp[i]]
                         mapped = (arc >= lo - 1e-6) & (arc <= hi + 1e-6)
-                        kinds = self._cover_roads(lines[i], arc, np.where(mapped, 2, kinds), ground)
+                        kinds = self._cover_roads(lines[i], arc, np.where(mapped, 2, kinds), surface)
                         kinds = _inferred_cover(kinds, mapped)
                         floor, forced = mapped_tunnel_floor(arc, floor, np.zeros(len(arc), np.int64),
                                                             kinds == 2, [(lo, hi)])
@@ -6309,12 +6312,13 @@ class TunnelProfiles(BridgeProfiles):
         return {"sections": mine(self.sections), "heights": mine(self.heights), "ups": mine(self.ups),
                 "caps": mine(self.caps), "mouths": mine(self.mouths), "open": {o for o in self.open
                                                                                if o.split("#")[0] in pids},
-                "drowned": {k: v for k, v in self._drowned.items() if k in pids}}
+                "drowned": {k: v for k, v in self._drowned.items() if k in pids},
+                "approach_owners": mine(self.approach_owners)}
 
     def _adopt_take(self, extra):
         if not extra:
             return
-        for name in ("sections", "heights", "ups", "caps", "mouths"):
+        for name in ("sections", "heights", "ups", "caps", "mouths", "approach_owners"):
             for k, v in extra[name].items():
                 getattr(self, name).setdefault(k, v)
         self.open.update(extra["open"])
