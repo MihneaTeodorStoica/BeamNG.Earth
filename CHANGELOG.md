@@ -2,6 +2,12 @@
 
 What changed in each release of BeamNG.Earth, newest first.
 
+## Unreleased
+
+- Keep bridge endpoint constraints attached to mapped road topology without displacing the deck. Spread
+  terrain-clearance lifts relative to the solved grade while preserving original floor peaks and existing
+  deck heights, reducing artificial approach cliffs without flattening genuine hills.
+
 ## 1.7.3 beta (2026-10-30)
 
 > **Join the TGForever Discord, [discord.gg/tgf](https://discord.gg/tgf), to chat, get help, report bugs or help
