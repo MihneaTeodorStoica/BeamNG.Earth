@@ -1717,7 +1717,8 @@ class Server:
                                                            roadsmod.SOUND_GARAGE)
             oil_wells = oilwells.tile_wells(anchor.frame, tx, ty, elev)     # (the mod's pump jacks)
             import powerlines
-            powerlines.tile_lines(anchor.frame, tx, ty, self.mapdata, elev, props, wires)    # high-voltage lines
+            powerlines.tile_lines(anchor.frame, tx, ty, self.mapdata, elev, props, wires,
+                                  road_context=near_roads, deck_context=deck_parts)    # high-voltage lines
             import industry
             garage_sound = (garage_sound + industry.refinery_sound_rows(anchor.frame, tx, ty, self.mapdata, elev)
                             + industry.power_plant_sound_rows(anchor.frame, tx, ty, self.mapdata, elev))
