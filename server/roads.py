@@ -6421,6 +6421,7 @@ def spare_carriageways(mask, parts, cells, frame, cx, cy, square):
 
 
 WALL_STEP = 2.0         # m between a retaining wall's points
+BACK_TOP_OVER_M = 3.0   # m a wall's top may rise over its capped height (grading.wall_max_h) at its back edge
 WALL_PROBE_M = 1.0      # m beyond the cut's foot (grading.WALL_T_M) where the natural ground's height is read
 WALL_TOP_M = 0.15       # m the wall stands over the ground behind it
 WALL_FOOT_M = 0.3       # m it reaches under the road
@@ -6827,7 +6828,7 @@ def retaining_walls(frame, roads, elev, exact, decks=()):
                          ((PARAPET_DROP_MOUNTAIN_M, PARAPET_PROBE_MOUNTAIN_M) if spec.mountain
                           else (PARAPET_DROP_M, PARAPET_PROBE_M))
                          if not spec.urban and spec.cls not in NO_PARAPET_CLASSES and not spec.median else None,
-                         grading.wall_max_h(spec)))
+                         grading.wall_max_h(spec), spec.mountain))
     if not pts_all:
         return []
 
@@ -6839,7 +6840,7 @@ def retaining_walls(frame, roads, elev, exact, decks=()):
     # finds no cutting (_wall_runs) and that gets no parapets has no use for them (most of a town's streets: 8 of 9 of
     # the ground lookups, 2026-10-25)
     probes, k = [], 0
-    for xy, z, out_n, core, inside, rh, steps, concrete, fid, rural, parapets, max_h in info:
+    for xy, z, out_n, core, inside, rh, steps, concrete, fid, rural, parapets, max_h, _mtn in info:
         gg = g[k:k + len(xy)]
         k += len(xy)
         need = len(steps) and (parapets is not None or _wall_runs(gg - z).any())
@@ -6853,13 +6854,15 @@ def retaining_walls(frame, roads, elev, exact, decks=()):
     others = {fid: (np.asarray(pts, np.float64)[:, :2], spec.width / 2) for fid, spec, pts, _ in roads if len(pts) >= 2}
     others = _Segs(others)          # (one table for all the carriageway tests below)
     bend_of = {}
-    for (xy, z, out_n, core, inside, rh, steps, concrete, fid, rural, parapets, max_h), (gg, need) in zip(info, probes):
+    for (xy, z, out_n, core, inside, rh, steps, concrete, fid, rural, parapets, max_h, mountain), (gg, need) in \
+            zip(info, probes):
         key = (id(xy), len(xy))
         if key not in bend_of:          # (a tight bend: no wall into it, grading.bend_zone)
             bend_of[key] = grading.bend_zone(xy)
         bends = bend_of[key]
         face = np.full(len(xy), core + 0.1)
         thick = np.full(len(xy), roadmesh.WALL_THICK_M)
+        ground_at = None
         top_g = gg
         if need:                    # the wall where the graded ground starts to climb (a sharp cutting: before the core's edge)
             gs = gsteps[k:k + len(xy) * len(steps)].reshape(len(steps), len(xy)).T
@@ -6882,9 +6885,17 @@ def retaining_walls(frame, roads, elev, exact, decks=()):
             # (and never past where the ground behind falls away again: between a hairpin's legs the bank tops out
             # and drops to the other leg, and the top hung out over that slope, its underside seen from the road
             # above, the Stelvio Pass 2026-10-21)
-            low = (gs < (top_g - WALL_SLAB_DZ)[:, None]) & (steps[None, :] > (face + 1.0)[:, None])
+            # (only past the grading's own flat strip and its climb behind the face, grading.WALL_FLAT_M / WALL_T_M:
+            # that strip at the road's level read as the ground falling away and cut the top to its coping, a trench
+            # between the wall and the slope behind it, "they float in front of the terrain", the user 2026-10-31)
+            low = (gs < (top_g - WALL_SLAB_DZ)[:, None]) & (steps[None, :] > np.maximum(
+                face + 1.0, core + grading.WALL_FLAT_M + grading.WALL_T_M)[:, None])
             reach = np.where(low.any(axis=1), steps[np.argmax(low, axis=1)] - face, np.inf)
             thick = np.minimum(thick, np.maximum(reach - 0.5, WALL_COPING_MIN_M))
+            # the graded ground at the top's back edge (the steps', then the probe's: back_top)
+            pd = core + grading.WALL_FLAT_M + grading.WALL_T_M + WALL_PROBE_M
+            ground_at = lambda d, idx: np.array([np.interp(d[n], np.r_[steps, pd], np.r_[gs[m], gg[m]])  # noqa: E731
+                                                 for n, m in enumerate(idx)])
         if parapets is not None and need:
             out.extend(_parapets(xy, z, out_n, rh, inside, steps, gs, others, fid, decks, *parapets))
         full = _wall_runs(gg - z) & ~_under_decks(xy + out_n * core, z, decks) & ~bends
@@ -6919,7 +6930,14 @@ def retaining_walls(frame, roads, elev, exact, decks=()):
                 # (rock faces only as an experiment, BNE_CLIFF_WALLS=on, for tall rural cuts: the Stelvio's hairpins are
                 # walled in dry stone, tall cuts too, Mapillary 2026-10-21; the user chose stone walls for passes)
                 tall = CLIFF_WALLS_ON and float(np.max(top_g[sl] - z[sl])) > CLIFF_MIN_CUT_M
-                out.append({"base": base, "top": np.maximum(tp, z[sl] + WALL_TAPER_LOW_M), "foot": z[sl] - WALL_FOOT_M,
+                top = np.maximum(tp, z[sl] + WALL_TAPER_LOW_M)
+                # (its top behind the coping rises to the graded ground at its back edge, never under the coping: the
+                # slope above goes on from the wall's top, held up by it; flat at the top's height, a band of grass
+                # standing out in front of the slope read as a thick freestanding wall, the user 2026-10-31)
+                back_top = top if ground_at is None else np.maximum(top, np.minimum(
+                    ground_at(face[sl] + th, range(i, j + 1)), z[sl] + max_h + BACK_TOP_OVER_M))
+                out.append({"base": base, "top": top, "back_top": back_top, "foot": z[sl] - WALL_FOOT_M,
+                            "mountain": bool(mountain),
                             "toward": -out_n[sl], "thick": th, "concrete": concrete, "rock": rural and tall,
                             "road_z": z[sl], "clear": _clear_depth(base, out_n[sl], np.full(len(base), CLIFF_REACH_M),
                                                                    others, fid),

@@ -629,5 +629,32 @@
     ],
     "groundType": "ASPHALT",
     "translucent": false
+  },
+  "bne_wall_scree": {
+    "name": "bne_wall_scree",
+    "mapTo": "bne_wall_scree",
+    "class": "Material",
+    "version": 1.5,
+    "persistentId": "89fea456-d542-5544-a477-307c8aef4301",
+    "Stages": [
+      {
+        "baseColorMap": "/assets/materials/terrain/rock/t_dirt_rocky/t_dirt_rocky_b.png",
+        "normalMap": "/assets/materials/terrain/rock/t_dirt_rocky/t_dirt_rocky_nm.png",
+        "roughnessMap": "/assets/materials/terrain/rock/t_dirt_rocky/t_dirt_rocky_r.png",
+        "ambientOcclusionMap": "/assets/materials/terrain/rock/t_dirt_rocky/t_dirt_rocky_ao.png",
+        "metallicFactor": 0,
+        "baseColorFactor": [
+          0.62,
+          0.6,
+          0.56,
+          1
+        ]
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "GRASS",
+    "translucent": false
   }
 }

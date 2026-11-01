@@ -1406,6 +1406,20 @@ class RetainingWallTest(unittest.TestCase):
         bank = self._walls(lambda n: np.clip((n - edge + 1.0) / 3.0, 0.0, 1.0) * 3.0)
         self.assertFalse(bank, "a natural bank: no wall")
 
+    def test_top_rises_to_the_slope_behind(self):
+        """A cutting whose ground climbs on past the wall (a hillside): the top's back edge meets the ground there
+        (back_top over top), and no trench between: its top reaches past the grading's flat strip (the user,
+        2026-10-31: "they float in front of the terrain")."""
+        import grading
+        rh = roads.carriageway("primary", "paved", True, None, False) / 2
+        edge = rh + grading.shoulder(roads.Spec(2 * rh, "paved", False, "primary")) + grading.WALL_FLAT_M
+        walls = self._walls(lambda n: np.clip((n - edge) / 0.8, 0.0, 1.0) * 6.0 + np.clip(n - edge - 0.8, 0.0, None))   # (deeper than the cap)
+        self.assertTrue(walls)
+        w = max(walls, key=lambda w: len(w["base"]))
+        mid = len(w["base"]) // 2
+        self.assertGreater(float(w["back_top"][mid]), float(w["top"][mid]) + 0.5)
+        self.assertGreaterEqual(float(w["thick"][mid]), grading.WALL_FLAT_M + grading.WALL_T_M)
+
     def test_mountain_road_parapet_from_a_smaller_drop(self):
         """Ground falling 1.5 m within 2 m of the edge: a pass road gets its parapet (PARAPET_DROP_MOUNTAIN_M), a
         rural secondary without the flag none (PARAPET_DROP_M)."""

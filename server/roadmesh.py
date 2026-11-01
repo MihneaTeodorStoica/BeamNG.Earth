@@ -1226,6 +1226,8 @@ TUNNEL_STONE_IN = "bne_tunnel_stone_in"   # the same stone darker: a low arch's 
 TUNNEL_SOIL = "bne_tunnel_soil"     # grass on the ground over the masonry: a retaining wall's top behind its coping,
                                     # a low arch's top (stone slabs on the grass, the user 2026-10-17: "blend the
                                     # stone and terrain better")
+WALL_SCREE = "bne_wall_scree"       # ... a mountain pass road's: rocky ground (the terrain's bngEarthGroundRock detail)
+SCREE_UV_M = 2.0           # m per repeat of the scree (bngEarthGroundRock's detail size)
 SOIL_UV_M = 1.0            # m per repeat of the grass (the terrain's detail texture: bngEarthGroundGrass, size 1)
 WALL_COPING_M = 0.5        # m of a retaining wall's top in stone (its coping), the rest of it soil
 WALL_SKIRT_M = 2.0         # m a retaining wall's back reaches down from its top
@@ -1283,18 +1285,21 @@ def _retaining_walls(walls, origin, P, T, UV, M, nv):
         thick = np.asarray(w.get("thick", np.full(k, WALL_THICK_M)), np.float64)    # (roads.retaining_walls)
         face_m, face_uv = (0, CONCRETE_UV_M) if w.get("concrete") else (2, STONE_UV_M)  # (a major road's: concrete)
         back = b - tw * thick[:, None]
+        # (its top behind the coping up to the ground at its back edge: roads.retaining_walls' back_top)
+        btop = np.maximum(np.asarray(w.get("back_top", top), np.float64), top)
         face_lo = np.c_[b, foot] - origin
         face_hi = np.c_[b, top] - origin
-        back_hi = np.c_[back, top] - origin
+        back_hi = np.c_[back, btop] - origin
         cop = np.minimum(WALL_COPING_M, thick)
         cop_hi = np.c_[b - tw * cop[:, None], top] - origin
         quads = [(face_lo, face_hi, foot, top, face_m), (face_hi, cop_hi, None, float(np.mean(cop)), face_m)]
         if (thick > cop + 0.01).any():          # the soil behind the coping (a parapet is all stone)
-            quads.append((cop_hi, back_hi, None, float(np.mean(thick - cop)), 4))
+            # (a mountain pass road's: the rocky ground of the slopes round it, WALL_SCREE; grass elsewhere)
+            quads.append((cop_hi, back_hi, None, float(np.mean(thick - cop)), 6 if w.get("mountain") else 4))
         if w.get("parapet"):                    # a parapet's back, seen from the valley
             bot = foot
         else:                                   # a retaining wall's back: down into the ground behind it (where the
-            bot = top - WALL_SKIRT_M            # ground there lies lower, its edge was open, seen from above)
+            bot = btop - WALL_SKIRT_M           # ground there lies lower, its edge was open, seen from above)
         back_lo = np.c_[back, bot] - origin
         quads.append((back_lo, back_hi, bot, top, face_m))
         # its underside, from the back's bottom to the face's foot: a closed solid (2026-10-27: no face of it open,
@@ -1305,7 +1310,7 @@ def _retaining_walls(walls, origin, P, T, UV, M, nv):
             if vlo is not None:
                 UV.append(np.column_stack((np.concatenate((s, s)) / face_uv, np.concatenate((vlo, vhi)) / face_uv)))
             else:
-                sc = SOIL_UV_M if mat == 4 else face_uv
+                sc = SOIL_UV_M if mat == 4 else (SCREE_UV_M if mat == 6 else face_uv)
                 UV.append(np.column_stack((np.concatenate((s, s)) / sc, np.concatenate((np.zeros(k), np.full(k, vhi))) / sc)))
             i = np.arange(k - 1)
             A, A1, B, B1 = nv + i, nv + i + 1, nv + k + i, nv + k + i + 1
@@ -1450,7 +1455,7 @@ def tunnel(chunks, origin, walls=()):
             if low and (cap_m is None or cap_m >= LOW_CAP_MIN):
                 nv = _arch_cap(P, T, UV, M, nv, mid, u, z, at, k, float(np.max(o[:, 0])), float(o[:, 1].max()), th, origin,
                                LOW_CAP_M if cap_m is None else min(LOW_CAP_M, float(cap_m)), 2 if stone else 0)
-    allm = [TUNNEL_SIDE, TUNNEL_LIGHT, TUNNEL_STONE, TUNNEL_STONE_IN, TUNNEL_SOIL, TUNNEL_INNER]
+    allm = [TUNNEL_SIDE, TUNNEL_LIGHT, TUNNEL_STONE, TUNNEL_STONE_IN, TUNNEL_SOIL, TUNNEL_INNER, WALL_SCREE]
     Tall = np.concatenate(T)
     Mall = np.concatenate([np.full(len(t), m, np.int64) for t, m in zip(T, M)]) if M else np.zeros(len(Tall), np.int64)
     used = sorted(set(int(v) for v in np.unique(Mall)) | {0, 1})     # (concrete and lamps first, as before)
