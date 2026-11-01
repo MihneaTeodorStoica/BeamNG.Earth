@@ -42,6 +42,67 @@ class RoadCorridorTest(unittest.TestCase):
         self.assertLess(bld.road_through(ring, lines), bld.ROAD_THROUGH_M)
         self.assertGreaterEqual(bld.road_through(ring, lines * 2), bld.ROAD_THROUGH_M)
 
+    def test_taper_widths_match_painted_source_segments_without_a_roadwide_maximum(self):
+        import surface
+        f = features([[(-200, 100), (-100, 100), (-50, 100), (-20, 100), (0, 100)],
+                      [(0, 100), (200, 100)]], ["residential", "residential"], widths=[(0, 3), (1, 9)])
+        flat = lambda la, lo: np.zeros(np.shape(la))
+        corridors = bld.road_corridors(FRAME, [f, f], -256, 0, flat)
+        self.assertEqual(len(corridors), 2)
+        xy, _, widths = corridors[0]
+        self.assertEqual(np.shape(widths), (len(xy) - 1,))
+        self.assertAlmostEqual(widths[0], 3, places=6, msg="the historic street beyond the taper stays narrow")
+        self.assertGreater(widths[-1], widths[0] + 1)
+        _, painted_half, _ = surface._road_segments(FRAME, -256, 0, 512, 512, 512, [f, f])
+        np.testing.assert_allclose(painted_half[:len(widths)], widths / 2 + surface.PHOTO_ROAD_EDGE_M, atol=1e-9)
+        flat_segments = bld._clearance_segments(corridors)
+        np.testing.assert_allclose(flat_segments[3][:len(widths)], widths / 2)
+
+        # Two otherwise identical houses beside the same source way: only the tapered end encroaches.
+        half = float(widths[-1] / 2)
+        offset = (1.5 + half) / 2
+        self.assertGreater(half - offset, bld.ROAD_NOISE_M)
+        rings = []
+        for k in (0, len(xy) - 2):
+            a, b = xy[k:k + 2]
+            u = (b - a) / np.linalg.norm(b - a)
+            normal = np.array([-u[1], u[0]])
+            p = a + 2 * u + offset * normal
+            ring = np.array([p, p + 8 * u, p + 8 * u + 10 * normal, p + 10 * normal, p])
+            la, lo, _ = FRAME.enu_to_geodetic(ring[:, 0] - 256, ring[:, 1], 0)
+            rings.append(np.column_stack([lo, la]))
+        layer = Feats(["narrow", "taper"], rings, **{"class": ["house", "house"],
+                      "height": [10., 10.], "roof_shape": ["flat", "flat"]})
+        items = bld.tile_buildings(FRAME, -256, 0, 0, 256, [layer], flat,
+                                  roads_xy=[xy], corridors=corridors)
+        self.assertEqual(len(items), 2)
+        narrow, tapered = sorted(items, key=lambda it: it[0].ring[:, 0].mean())
+        self.assertFalse(narrow[0].road_trimmed, "a wide joint must not shave the rest of a narrow street")
+        self.assertTrue(tapered[0].road_trimmed, "the old scalar spec width misses this tapered edge")
+        a, b = xy[-2:]
+        u = (b - a) / np.linalg.norm(b - a)
+        normal = np.array([-u[1], u[0]])
+        for mesh in (bld.build([tapered]), bld.build([tapered], lite=True), bld.collision_mesh([tapered])):
+            p, _, t = mesh[:3]
+            walls = p[t][p[t][:, :, 2].min(1) < 1]
+            self.assertGreater(len(walls), 0)
+            self.assertGreaterEqual(((walls[:, :, :2] - a) @ normal).min(), half - 1e-6)
+
+    def test_development_ship_and_quay_meshes_keep_their_geometry(self):
+        import ships
+        ring = rect(20, 42, 14, 16)
+        segments = bld._clearance_segments([(np.array([[-100., 40.], [600., 40.]]), np.zeros(2), 8)])
+        for spec in (ships.spec(ring.copy(), {"height": 10}, .5), ships.pier_spec(ring.copy(), .5)):
+            items = [(spec, 0., 0.)]
+            meshes = (bld.build(items), bld.build(items, lite=True), bld.collision_mesh(items))
+            bld._clear_road(spec, 0, 0, segments)
+            self.assertFalse(spec.road_trimmed)
+            np.testing.assert_array_equal(spec.ring, ring)
+            for before, after in zip(meshes, (bld.build(items), bld.build(items, lite=True),
+                                              bld.collision_mesh(items))):
+                np.testing.assert_array_equal(before[0], after[0])
+                np.testing.assert_array_equal(before[2], after[2])
+
 
 class BuildingClearanceTest(unittest.TestCase):
     def setUp(self):
@@ -107,8 +168,8 @@ class BuildingClearanceTest(unittest.TestCase):
             spec = self.items(rect(20, 42, 14, 16), road_z=z)[0][0]
             self.assertFalse(spec.road_trimmed)
 
-    def test_toll_canopies_and_bridge_supports_are_not_shaved(self):
-        for cls in ("toll_booth", "roof", "shelter", "bridge_structure"):
+    def test_toll_canopies_bridge_supports_and_harbour_structures_are_not_shaved(self):
+        for cls in ("toll_booth", "roof", "shelter", "bridge_structure", "ship", "pier"):
             spec = self.items(rect(20, 42, 14, 16), cls=cls)[0][0]
             self.assertFalse(spec.road_trimmed, cls)
 
