@@ -2,6 +2,12 @@
 
 What changed in each release of BeamNG.Earth, newest first.
 
+## Unreleased
+
+- Protect every occupied local-player vehicle, including sparse split-screen seats and cars just
+  entered from traffic, from AI recycling, traffic-pool deactivation and far-car removal. Ordinary
+  AI traffic and unoccupied spare cars retain their existing lifecycle.
+
 ## 1.7.3 beta (2026-10-30)
 
 > **Join the TGForever Discord, [discord.gg/tgf](https://discord.gg/tgf), to chat, get help, report bugs or help
