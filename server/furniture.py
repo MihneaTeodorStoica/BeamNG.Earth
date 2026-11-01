@@ -554,8 +554,9 @@ def _box_distance2(a, b, low, high):
 class RoadClearance:
     """Reusable segment index for complete, yawed furniture colliders against carriageways at every level.
 
-    lines: [(half width, points (k, 2 or 3))]; decks: [(points (k, 3), half width)]. A half width is a scalar
-    or an array of k-1 segment widths. Unknown heights (2D lines) conservatively block at every level. The existing
+    lines: [(half width, points (k, 2 or 3))]; decks: [(points (k, 3), half width, structural depth)]. A half width
+    is a scalar or an array of k-1 segment widths. Existing two-item deck contexts without known depth use the full
+    default slab and girder depth. Unknown heights (2D lines) conservatively block at every level. The existing
     roadwidth.Walls bucket index supplies nearby segments, including the interiors of long segments; there is no
     per-object scan of all roads, nor an own-road exemption. bounds limits construction, not placement/ownership.
     """
@@ -565,7 +566,7 @@ class RoadClearance:
         import roadwidth
         aa, bb, widths, bottoms = [], [], [], []
         for half, points, bottom in [(h, p, 0.0) for h, p in lines] + [
-                (h, p, roadmesh.DECK_DEPTH + roadmesh.GIRDER_D) for p, h in decks]:
+                (d[1], d[0], float(d[2]) if len(d) > 2 else roadmesh.DECK_DEPTH + roadmesh.GIRDER_D) for d in decks]:
             p = np.asarray(points, np.float64)
             if len(p) < 2:
                 continue

@@ -458,8 +458,10 @@ def navgraph(aid, lat, lon, zoom, x, y, out_dir, vfs_dir, serial, left_hand, mph
     try:
         # (its own deck heights, on that ground: the road tiles' profiles plan every cell they touch, and the graph's
         # 2.2 km window planned ~50 cells, minutes of a road process on a Windows PC, 2026-10-25)
-        for fid, _spec, xy, z, _lon in _nav_bridges(aid, frame, elev).parts(feats, (x - w, y - w, x + w, y + w)):
-            decks.setdefault(fid, []).append((np.asarray(xy, np.float64)[:, :2], np.asarray(z, np.float64)))
+        bridges = _nav_bridges(aid, frame, elev)
+        for fid, _spec, xy, z, _lon in bridges.parts(feats, (x - w, y - w, x + w, y + w)):
+            decks.setdefault(fid, []).append((np.asarray(xy, np.float64)[:, :2], np.asarray(z, np.float64),
+                                             bridges.depth_of(fid)))
     except Exception as e:          # no decks: the graph follows the ground under bridges
         log.debug("navgraph decks: %s: %s", type(e).__name__, e)
     urban = _s.surface.urban if _s.surface is not None else None

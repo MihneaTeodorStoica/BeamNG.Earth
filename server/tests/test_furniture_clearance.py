@@ -247,6 +247,93 @@ class DevelopmentContextTest(unittest.TestCase):
         self.assertTrue(all(actual.clear(r) for r in rows if r[0] == furniture.G_LAMP))
         self.assertFalse(any(r[0] == furniture.G_LAMP for r in furniture.place([nominal], walks, box)))
 
+    def test_painted_mean_taper_preserves_lamps_in_tile_and_graph_contexts(self):
+        import navgraph
+        f = features([[(0., 100.), (100., 100.)], [(100., 100.), (200., 100.)]],
+                     ['primary', 'primary'], widths=[(0, 12.), (1, 4.)])
+        urban = lambda la, lo: np.ones(np.shape(la), bool)
+        elev = lambda la, lo: np.zeros(np.shape(la))
+        tile, near = [], []
+        roads.build_tile(FRAME, 0, 0, [f], elev, urban_fn=urban, clearance_out=tile, roads_out=near)
+        fid, spec, pts, lon = near[0]
+        self.assertEqual(spec.width, 12.)
+        self.assertAlmostEqual(tile[0].half[0], 5., delta=.02, msg='endpoint widths 12 and 8 paint a 10 m road')
+        walks = [{'fid': fid, 'pts': pts + [0., 6.35, 0.], 'side': 1, 'w': 2.5}]
+        box = (0., 0., 256., 256.)
+        lamps = [r for r in furniture.place([near[0]], walks, box, curb_h=0., clearance=tile[0])
+                 if r[0] == furniture.G_LAMP]
+        self.assertTrue(lamps, 'the 5.6 m pivot clears a painted 5 m road edge')
+        self.assertFalse(any(r[0] == furniture.G_LAMP for r in furniture.place([near[0]], walks, box, curb_h=0.)),
+                         'the obsolete nominal 12 m half-width would delete this lamp')
+        lamp = lamps[0]
+        self.assertAlmostEqual(lamp[2] - pts[0, 1], 5.6, delta=.02)
+        self.assertAlmostEqual((lamp[2] - pts[0, 1]) - .144, 5.456, delta=.02)
+        intruding = list(lamp)
+        intruding[2] -= .5
+        self.assertFalse(tile[0].clear(intruding), 'a post inside the actual painted margin must still be rejected')
+
+        captured, make = [], furniture.RoadClearance
+        def record(*args, **kwargs):
+            index = make(*args, **kwargs)
+            captured.append(index)
+            return index
+        with patch.object(furniture, 'RoadClearance', side_effect=record):
+            navgraph.build(FRAME, [f], elev, (50., 100.), urban_fn=urban)
+        self.assertEqual(len(captured), 1)
+        self.assertAlmostEqual(captured[0].half[0], 5., delta=.02)
+        self.assertTrue(captured[0].clear(lamp), 'dynamic signals use the same actual ground clearance')
+        self.assertFalse(captured[0].clear(intruding))
+
+    def test_short_deck_actual_depth_keeps_lamp_in_tile_and_graph_contexts(self):
+        import navgraph
+        base, walks, box, _, _ = PlacementClearanceTest().fixture()
+        target = next(r for r in furniture.place([base], walks, box, curb_h=0.)
+                      if r[0] == furniture.G_LAMP and 20. < r[1] < 236.)
+        self.assertAlmostEqual(target[3] + furniture.COLLISION_BOXES[furniture.G_LAMP][1][1][5], 8.271)
+        f = features([[(0., target[2]), (256., target[2])]], ['primary'],
+                     flags=[(0, 'is_bridge')], ids=['short-deck'])
+        ll = np.asarray(f.parts(0)[0][0], np.float64)
+        x, y, _ = FRAME.geodetic_to_enu(ll[:, 1], ll[:, 0], 0.)
+        xy, z = np.column_stack([x, y]), np.full(len(x), 10.)
+        pts = np.column_stack([xy, z])
+        deck_spec = roads.bridge_specs(f)[0]
+        chunks = roads._deck_chunks([('short-deck', deck_spec, pts, 0.)], (0., 0., 256., 256.),
+                                    depths={'short-deck': .9})
+        ground = features([[tuple(p[:2]) for p in base[2]]], ['residential'], ids=[base[0]],
+                          widths=[(0, 8.)])
+        elev = lambda la, lo: np.zeros(np.shape(la))
+        urban = lambda la, lo: np.ones(np.shape(la), bool)
+        tile = []
+        with patch.object(roads, '_bridge_chunks', return_value=chunks):
+            roads.build_tile(FRAME, 0, 0, [ground], elev, urban_fn=urban, clearance_out=tile)
+        deck_context = [roads._deck_clearance(ch) for ch in chunks if ch.get('deck')]
+        self.assertTrue(deck_context)
+        self.assertTrue(all(depth == .9 for _, _, depth in deck_context))
+        self.assertTrue(tile[0].clear(target), '8.271 m lamp collider is below the 9.1 m real underside')
+        self.assertFalse(furniture.RoadClearance([], [(pts, deck_spec.width / 2)]).clear(target),
+                         'the unknown-depth 2.2 m default would put the underside at 7.8 m')
+        raised = list(target)
+        raised[3] = 1.
+        self.assertFalse(tile[0].clear(raised), 'a lamp that actually reaches the underside is rejected')
+        decks_for_wires = [(p, h) for p, h, _ in deck_context]
+        placed = furniture.place([base], walks, box, curb_h=0., decks=decks_for_wires, clearance=tile[0])
+        self.assertIn(target, placed)
+
+        captured, make = [], furniture.RoadClearance
+        def record(*args, **kwargs):
+            index = make(*args, **kwargs)
+            captured.append(index)
+            return index
+        with patch.object(furniture, 'RoadClearance', side_effect=record):
+            graph = navgraph.build(FRAME, [f], elev, (128., target[2]),
+                                   decks={'short-deck': [(xy, z, .9)]})
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(graph['nodes'], 'three-item bridge parts still supply the graph node elevations')
+        self.assertTrue(all(abs(n[2] - 10.) < .05 for n in graph['nodes'].values()))
+        self.assertTrue(np.allclose(captured[0].bottom, .9))
+        self.assertTrue(captured[0].clear(target))
+        self.assertFalse(captured[0].clear(raised))
+
     def test_actual_shifted_sidewalk_deck_and_its_taper_feed_the_shared_index(self):
         spec = roads.Spec(8., 'paved', True, 'primary', False)
         pts = np.array([[0., 100., 20.], [128., 100., 20.], [256., 100., 20.]])
