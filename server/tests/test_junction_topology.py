@@ -41,6 +41,11 @@ def surface(plans):
     return grading.grade_points(x, y, np.full(len(x), 12.0), grading.PlanPack(plans), grading.ROAD_LIFT)
 
 
+def original_sources(feats):
+    return [(i, source, lo, hi) for i in range(len(feats))
+            for _part, source, lo, hi in roads.ground_parts_with_source(feats, i)]
+
+
 def captured_case():
     fixture = json.loads((Path(__file__).parent / "fixtures" / "dundonald_junction_topology.json").read_text())
     rows = fixture["roads"]
@@ -140,13 +145,44 @@ class SourceConnectorTest(unittest.TestCase):
         f.rules["connectors"] = rules([(0, "west", 0.0, 0.0), (0, "east", 1.0, 1.0)])
         ring = f.parts(0)[0][0]
         g = grading._Planner(FRAME, FakeMD(f), lambda la, lo: np.full(np.shape(la), 10.0))
-        clipped = g._near_cell(ring, (-100, -20, 100, 20))
+        clipped = g._near_cell(ring, (-100, -20, 100, 20), ring, 0.0, 1.0)
         self.assertTrue(clipped)
-        self.assertEqual(grading.junction_nodes(FRAME, f, [("long", PRIMARY, clipped[0])]), [[]])
-        retained = g._near_cell(ring, (-5000, -20, 100, 20))[0]
+        self.assertEqual(grading.junction_nodes(FRAME, f, [(0, ring, a, b) for _part, a, b in clipped]), [[]])
+        retained, a, b = g._near_cell(ring, (-5000, -20, 100, 20), ring, 0.0, 1.0)[0]
         np.testing.assert_array_equal(retained[0], ring[0])
-        nodes = grading.junction_nodes(FRAME, f, [("long", PRIMARY, retained)])[0]
+        nodes = grading.junction_nodes(FRAME, f, [(0, ring, a, b)])[0]
         self.assertEqual([(name, end) for name, _xy, end in nodes], [("west", 0)])
+
+    def test_long_clipped_join_survives_enu_roundtrip_in_terrain_consumer(self):
+        frame = geodesy.EnuFrame(0.0, 0.0)
+        lines = [np.array([[0.1, -0.05], [0.1, 0.05]]), np.array([[0.1, 0.0], [0.102, 0.0]])]
+        f = mapgeom.build("roads", ["main", "side"], [(mapgeom.LINE, [[line]]) for line in lines])
+        f.attrs["class"] = np.array(["primary", "service"])
+        f.attrs["subtype"] = np.array(["road", "road"])
+        f.rules["connectors"] = rules([(0, "join", 0.5, 0.5), (1, "join", 0.0, 0.0)])
+        g = grading._Planner(frame, FakeMD(f), lambda la, lo: np.full(np.shape(la), 10.0))
+        main, original, lo, hi = roads.ground_parts_with_source(f, 0)[0]
+        piece, start, end = g._near_cell(main, (11000, -100, 11200, 100), original, lo, hi)[0]
+        # The planning geometry really is displaced by the u=0/h=0 roundtrip, as in the report.
+        self.assertGreater(float(np.max(np.abs(piece[:, 0] - 0.1))), 1e-7)
+        self.assertLess(start, 0.5)
+        self.assertGreater(end, 0.5)
+        side, side_source, a, b = roads.ground_parts_with_source(f, 1)[0]
+        nodes = grading.junction_nodes(frame, f, [(0, original, start, end), (1, side_source, a, b)])
+        self.assertEqual([[(name, end) for name, _point, end in row] for row in nodes],
+                         [[("join", -1)], [("join", 0)]])
+        plans = grading.plan_roads(frame, [(piece, PRIMARY), (side, SERVICE)],
+                                   lambda la, lo: np.full(np.shape(la), 10.0), cuts=False)
+        plans[0].rid, plans[1].rid = 1, 2
+        plans[1].z = np.full(len(plans[1].z), 12.0)
+        q = plans[1].xy[4:15]
+        q = np.concatenate([q + [0.0, lateral] for lateral in (-1.0, 0.0, 1.0)])
+        before = grading.grade_points(q[:, 0], q[:, 1], np.full(len(q), 12.0), plans)
+        grading.snap_junctions(plans, [PRIMARY, SERVICE], nodes)
+        self.assertAlmostEqual(plans[1].z[0], 10.0, places=6)
+        self.assertEqual(plans[1].z[-1], 12.0)
+        after = grading.grade_points(q[:, 0], q[:, 1], np.full(len(q), 12.0), plans)
+        self.assertGreater(float(np.max(before - after)), 0.25)
 
     def test_original_corner_connector_survives_resampling_chord(self):
         # The original node is at station102: halfway between the plan's retained100/104m
@@ -159,7 +195,7 @@ class SourceConnectorTest(unittest.TestCase):
         ps = grading.plan_roads(FRAME, parts, lambda la, lo: np.full(np.shape(la), 10.0), cuts=False)
         ps[0].rid, ps[1].rid = 1, 2
         ps[1].z = np.full(len(ps[1].z), 12.0)
-        source = [(str(f.ids[i]), specs[i], parts[i][0]) for i in range(2)]
+        source = [(i, parts[i][0], 0.0, 1.0) for i in range(2)]
         nodes = grading.junction_nodes(FRAME, f, source)
         self.assertEqual([len(row) for row in nodes], [1, 1])
         point = np.asarray(nodes[0][0][1])
@@ -175,13 +211,30 @@ class SourceConnectorTest(unittest.TestCase):
         after = grading.grade_points(q[:, 0], q[:, 1], np.full(len(q), 12.0), ps)
         self.assertGreater(float(np.max(before - after)), 0.25)
 
-    def test_source_membership_is_not_just_the_clipped_piece_bounding_box(self):
-        f = features([[(-100, 0), (0, 0), (0, 100)]], ["primary"], ids=["bend"])
-        f.rules["connectors"] = rules([(0, "join", 0.5, 0.5)])
-        # An artificial piece across the original bend's box does not contain its connector.
-        ring = f.parts(0)[0][0]
-        cut = ring[[0, 2]]
-        self.assertEqual(grading.junction_nodes(FRAME, f, [("bend", PRIMARY, cut)]), [[]])
+    def test_clipped_nearby_hairpin_leg_does_not_gain_another_legs_connector(self):
+        # The two clipped legs are 2 cm apart, but the connector is only on the outgoing leg.
+        f = features([[(-4000, 0), (4000, 0), (4000, 0.02), (-4000, 0.02)]],
+                     ["primary"], ids=["hairpin"])
+        f.rules["connectors"] = rules([(0, "join", 0.25, 0.25)])
+        ground, source, lo, hi = roads.ground_parts_with_source(f, 0)[0]
+        g = grading._Planner(FRAME, FakeMD(f), lambda la, lo: np.full(np.shape(la), 10.0))
+        clipped = g._near_cell(ground, (-100, -5, 100, 5), source, lo, hi)
+        self.assertEqual(len(clipped), 2)
+        nodes = grading.junction_nodes(FRAME, f, [(0, source, a, b) for _part, a, b in clipped])
+        self.assertEqual([[name for name, _xy, _end in row] for row in nodes], [["join"], []])
+
+    def test_clipping_preserves_stations_after_a_bridge_or_tunnel(self):
+        for flag in ("is_bridge", "is_tunnel"):
+            f = features([[(-6000, 0), (-2000, 0), (0, 0), (2000, 0), (6000, 0)]],
+                         ["primary"], ids=["long-layer"], flags=[(0, flag, 0.2, 0.4)])
+            f.rules["connectors"] = rules([(0, "under", 0.3, 0.3), (0, "ground", 0.5, 0.5),
+                                           (0, "outside", 0.8, 0.8)])
+            ground, source, lo, hi = roads.ground_parts_with_source(f, 0)[-1]
+            g = grading._Planner(FRAME, FakeMD(f), lambda la, lo: np.full(np.shape(la), 10.0))
+            clipped = g._near_cell(ground, (-100, -20, 100, 20), source, lo, hi)
+            self.assertEqual(len(clipped), 1)
+            nodes = grading.junction_nodes(FRAME, f, [(0, source, a, b) for _part, a, b in clipped])
+            self.assertEqual([[name for name, _xy, _end in row] for row in nodes], [["ground"]])
 
     def test_tunnel_and_bridge_ranges_do_not_supply_surface_connectors(self):
         for flag in ("is_bridge", "is_tunnel"):
@@ -189,7 +242,12 @@ class SourceConnectorTest(unittest.TestCase):
                          flags=[(0, flag, 0.4, 0.6)])
             f.rules["connectors"] = rules([(0, "west", 0.0, 0.0), (0, "under", 0.5, 0.5),
                                            (0, "east", 1.0, 1.0)])
-            parts = [("layers", PRIMARY, r) for r in roads.ground_parts(f, 0)]
+            bare = roads.ground_parts(f, 0)
+            annotated = roads.ground_parts_with_source(f, 0)
+            self.assertEqual(len(bare), len(annotated))
+            for piece, (from_source, _ring, _lo, _hi) in zip(bare, annotated):
+                np.testing.assert_array_equal(piece, from_source)
+            parts = [(0, ring, lo, hi) for _piece, ring, lo, hi in annotated]
             nodes = grading.junction_nodes(FRAME, f, parts)
             self.assertEqual({name for row in nodes for name, _xy, _end in row}, {"west", "east"})
 
@@ -201,7 +259,7 @@ class SourceConnectorTest(unittest.TestCase):
         normal = grading._normals(xy)
         q = np.concatenate([xy + lateral * normal for lateral in (-2.0, 0.0, 2.0)])
         z0 = grading.grade_points(q[:, 0], q[:, 1], np.full(len(q), 12.0), plans)
-        nodes = grading.junction_nodes(frame, f, source)
+        nodes = grading.junction_nodes(frame, f, original_sources(f))
         grading.snap_junctions(plans, specs, nodes)
         np.testing.assert_array_equal(plans[0].z, before[0])
         np.testing.assert_array_equal(grading.grade_points(q[:, 0], q[:, 1], np.full(len(q), 12.0), plans), z0)
@@ -211,7 +269,7 @@ class SourceConnectorTest(unittest.TestCase):
 
     def test_solved_source_geometry_roundtrips_for_workers_and_restarts(self):
         frame, f, source, plans, specs = captured_case()
-        grading.snap_junctions(plans, specs, grading.junction_nodes(frame, f, source))
+        grading.snap_junctions(plans, specs, grading.junction_nodes(frame, f, original_sources(f)))
         q = plans[0].xy
         expected = grading.grade_points(q[:, 0], q[:, 1], np.full(len(q), 12.0), plans)
         named = [(fid, p) for (fid, _spec, _line), p in zip(source, plans)]

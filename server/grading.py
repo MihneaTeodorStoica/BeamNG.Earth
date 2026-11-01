@@ -309,8 +309,8 @@ class Plan:
 
 
 def clip_polyline(xy, box):
-    """The runs (each (k, 2), k >= 2) of polyline xy (k, 2) inside box (x0, y0, x1, y1), segments cut at its edges
-    (Liang-Barsky). Pure."""
+    """The runs of a polyline (k, D >= 2) inside box (x0, y0, x1, y1), segments cut at its edges
+    (Liang-Barsky). Additional columns are interpolated with the same segment fractions. Pure."""
     x0, y0, x1, y1 = box
     runs, cur = [], None
     for i in range(len(xy) - 1):
@@ -341,6 +341,10 @@ def clip_polyline(xy, box):
             continue
         a = (px + dx * ta, py + dy * ta) if ta > 0.0 else (px, py)
         b = (px + dx * tb, py + dy * tb) if tb < 1.0 else (float(xy[i + 1, 0]), float(xy[i + 1, 1]))
+        if xy.shape[1] > 2:
+            u, v = xy[i, 2:], xy[i + 1, 2:]
+            a += tuple(u if ta == 0.0 else u + ta * (v - u))
+            b += tuple(v if tb == 1.0 else u + tb * (v - u))
         if cur is not None and ta == 0.0:
             cur.append(b)
         else:
@@ -651,54 +655,35 @@ def road_rank(spec):
     return r - 1 if cls != base else r
 
 
-def junction_nodes(frame, feats, parts):
-    """Mapped (connector ID, ENU point, end 0/1 or -1) occurrences of each planned source part.
+def junction_nodes(frame, feats, sources):
+    """Mapped (connector ID, ENU point, end 0/1 or -1) for each planned source occurrence.
 
-    Identity, not proximity, proves a join. Fractions refer to the original feature, never to a clipped
-    piece or a bridge/tunnel's ground remainder. Missing topology deliberately gives no junction.
+    Each source is (feature index, original ring, start fraction, end fraction). The interval is
+    carried through ground/bridge partitioning and cell clipping; geometry or proximity alone never
+    proves that a connector belongs to a piece or that two roads join.
     """
     con = feats.rules.get("connectors")
     if con is None:
-        return [[] for _ in parts]
-    by_id = {str(fid): i for i, fid in enumerate(feats.ids)}
+        return [[] for _ in sources]
     markers = {}
-    for fid, _spec, _line in parts:
-        if fid in markers:
-            continue
-        i = by_id[fid]
-        found = []
-        ranges = roadsmod.level_ranges(feats, i)
-        for part in feats.parts(i):
-            for ring in part:
-                if len(ring) < 2:
-                    continue
-                for r in con.rows(i):
-                    at, name = float(con.start[r]), str(con.value[r])
-                    if not name or not 0.0 <= at <= 1.0 or any(a <= at <= b for a, b, _kind in ranges):
-                        continue
-                    point = ring[0] if at == 0 else ring[-1] if at == 1 else roadsmod.sub_polyline(ring, at, 1.0)[0]
-                    found.append((name, np.asarray(point, np.float64)[:2]))
-        markers[fid] = found
     out = []
-    for fid, _spec, line in parts:
+    for i, ring, lo, hi in sources:
+        key = (i, id(ring))
+        if key not in markers:
+            ranges = roadsmod.level_ranges(feats, i)
+            found = []
+            for r in con.rows(i):
+                at, name = float(con.start[r]), str(con.value[r])
+                if not name or not 0.0 <= at <= 1.0 or any(a <= at <= b for a, b, _kind in ranges):
+                    continue
+                point = ring[0] if at == 0 else ring[-1] if at == 1 else roadsmod.sub_polyline(ring, at, 1.0)[0]
+                found.append((name, at, np.asarray(point, np.float64)[:2]))
+            markers[key] = found
         row = []
-        lo, hi = np.min(line[:, :2], axis=0) - 1e-10, np.max(line[:, :2], axis=0) + 1e-10
-        # Establish membership on the original piece, not on the plan's resampling chords. At a
-        # right-angle source vertex a valid connector can be sqrt(2) m from a 4 m plan chord.
-        scale = np.array([111320.0 * math.cos(math.radians(float(np.mean(line[:, 1])))), 111320.0])
-        origin = np.asarray(line[0, :2], np.float64)
-        xy = (np.asarray(line[:, :2], np.float64) - origin) * scale
-        delta = np.diff(xy, axis=0)
-        ll = np.maximum((delta * delta).sum(axis=1), 1e-12)
-        for name, point in markers[fid]:
-            if (point < lo).any() or (point > hi).any():
+        for name, at, point in markers[key]:
+            if at < lo - 1e-12 or at > hi + 1e-12:
                 continue
-            q = (point - origin) * scale
-            t = np.clip(((q - xy[:-1]) * delta).sum(axis=1) / ll, 0.0, 1.0)
-            if np.linalg.norm(xy[:-1] + t[:, None] * delta - q, axis=1).min() > 0.05:
-                continue        # outside this original ground/clipped piece, even if inside its box
-            end = 0 if np.allclose(point, line[0, :2], rtol=0, atol=1e-10) else \
-                1 if np.allclose(point, line[-1, :2], rtol=0, atol=1e-10) else -1
+            end = 0 if abs(at - lo) <= 1e-12 else 1 if abs(at - hi) <= 1e-12 else -1
             row.append((name, point, end))
         out.append(row)
     points = np.array([point for row in out for _name, point, _end in row], np.float64).reshape(-1, 2)
@@ -904,7 +889,7 @@ class _Planner:
         plans = []
         if feats is not None and len(feats):
             specs = roadsmod.road_specs(feats, None, self.widths)
-            parts, ids, clipped = [], [], []
+            parts, ids, clipped, sources = [], [], [], []
             box = self._clip_box(key)
             keeps = []
             for i in range(len(feats)):
@@ -916,12 +901,13 @@ class _Planner:
                     continue
                 if specs[i] is None:
                     continue
-                for ring in roadsmod.ground_parts(feats, i):     # not bridges / tunnels
-                    pieces = self._near_cell(np.asarray(ring, np.float64), box)
-                    for r in pieces:
+                for ring, source, lo, hi in roadsmod.ground_parts_with_source(feats, i):
+                    pieces = self._near_cell(np.asarray(ring, np.float64), box, source, lo, hi)
+                    for r, start, end in pieces:
                         parts.append((r, specs[i]))
                         ids.append(str(feats.ids[i]))
                         clipped.append(len(pieces) > 1 or r is not ring)
+                        sources.append((i, source, start, end))
             pspecs = []
             abut = None
             if (ABUT_FILL_ON or APPROACH_ON) and parts:
@@ -941,16 +927,19 @@ class _Planner:
                     log.debug("grading: road chains of %s: %s: %s", key, type(e).__name__, e)
             pclip = []
             pparts = []                         # (fid, spec, lon/lat ring) of each plan (roadcorners.grade_rows)
+            psources = []
             coarse = COARSE_EASE_ON and self._coarse(key)
-            for fid, part, cl, p in zip(ids, parts, clipped, plan_roads(self.frame, parts, self.elev, abut, ext, pins,
-                                                                         coarse=coarse, obs=self._obs(key))):
+            for fid, part, cl, source, p in zip(ids, parts, clipped, sources,
+                                               plan_roads(self.frame, parts, self.elev, abut, ext, pins,
+                                                          coarse=coarse, obs=self._obs(key))):
                 if p is not None:
                     p.rid = road_id(fid)
                     plans.append((fid, p))
                     pspecs.append(part[1])
                     pclip.append(cl)
                     pparts.append((fid, part[1], part[0]))
-            nodes = junction_nodes(self.frame, feats, pparts) if JUNCTION_SNAP_ON else []
+                    psources.append(source)
+            nodes = junction_nodes(self.frame, feats, psources) if JUNCTION_SNAP_ON else []
             if JUNCTION_SNAP_ON and plans:
                 try:
                     snap_junctions([p for _f, p in plans], pspecs, nodes)
@@ -1299,28 +1288,36 @@ class _Planner:
         m = margin
         return float(e.min()) - m, float(n.min()) - m, float(e.max()) + m, float(n.max()) + m
 
-    def _near_cell(self, ring, box):
-        """A road part (lon/lat ring) as planned for a cell: as it is, or, longer than LONG_PART_M, the pieces of it
-        within the cell's box (each its own plan). A cell's plans sampled the ground along every road through it
-        to its ends: on the Bonneville salt flats, tracks one segment 27 km long, ~2,500 DEM tiles for one road
-        tile's four cells (2026-10-20). The profile's smoothing (SIGMA_M) reaches a few tens of metres: the plan
-        within the cell is the same."""
+    def _near_cell(self, ring, box, source, lo, hi):
+        """A road part near a cell, each piece with its original source-ring fraction interval.
+
+        Long parts are cut in ENU with a margin for profile smoothing. Carrying their source
+        stations through the same cuts identifies connectors without reversing a lossy ENU/height
+        projection or guessing from a nearby segment of the road.
+        """
         if box is None or len(ring) < 2:
-            return [ring]
+            return [(ring, lo, hi)]
         e, n, _ = self.frame.geodetic_to_enu(ring[:, 1], ring[:, 0], 0.0)
         xy = np.stack([np.asarray(e, np.float64), np.asarray(n, np.float64)], axis=1)
         if float(np.hypot(*np.diff(xy, axis=0).T).sum()) <= LONG_PART_M:
-            return [ring]
+            return [(ring, lo, hi)]
+        # Match sub_polyline's source arc fractions, including its original interior vertices.
+        c = math.cos(math.radians(float(np.mean(source[:, 1]))))
+        s = np.r_[0.0, np.cumsum(np.hypot(np.diff(source[:, 0]) * c, np.diff(source[:, 1])))]
+        if (lo, hi) == (0.0, 1.0):
+            stations = s / s[-1]
+        else:
+            stations = np.r_[lo, s[(s > lo * s[-1]) & (s < hi * s[-1])] / s[-1], hi]
         out = []
-        for run in clip_polyline(xy, box):
-            la, lo, _ = self.frame.enu_to_geodetic(run[:, 0], run[:, 1], 0.0)
-            part = np.stack([np.asarray(lo, np.float64), np.asarray(la, np.float64)], axis=1)
+        for run in clip_polyline(np.column_stack([xy, stations]), box):
+            la, lo_, _ = self.frame.enu_to_geodetic(run[:, 0], run[:, 1], 0.0)
+            part = np.stack([np.asarray(lo_, np.float64), np.asarray(la, np.float64)], axis=1)
             # Retained endpoints keep their source connector coordinates, not a round-trip approximation.
-            if np.array_equal(run[0], xy[0]):
+            if np.array_equal(run[0, :2], xy[0]):
                 part[0] = ring[0]
-            if np.array_equal(run[-1], xy[-1]):
+            if np.array_equal(run[-1, :2], xy[-1]):
                 part[-1] = ring[-1]
-            out.append(part)
+            out.append((part, float(run[0, 2]), float(run[-1, 2])))
         return out
 
     def _obs(self, key, lonlat=None):
