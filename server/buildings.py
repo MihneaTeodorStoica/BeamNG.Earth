@@ -1824,10 +1824,15 @@ def road_lines(frame, road_layers, x0, y0, margin=50.0, size=256.0):
 def road_corridors(frame, road_layers, x0, y0, elev, margin=50.0, size=256.0,
                    urban_fn=None, widths=None, left_hand=False):
     """Ground carriageways [(tile-local xy, frame-up z, full width)], using the same specs and ground pieces as
-    roads.build_tile. Bridges and tunnels are deliberately excluded: projected overlap alone is not a collision.
-    Keep whole lines across tile boundaries and take source-cell duplicates once, by feature id."""
+    roads.build_tile. Width is scalar without a taper, otherwise one full width per source segment, matching
+    surface.paint_roads / _road_segments' mean of the endpoint taper widths. Never widen a whole historic street
+    to its largest joint. Bridges and tunnels are excluded; source-cell duplicates are taken once by feature id."""
     import roads as roadsmod
     out, seen = [], set()
+    copies = roadsmod.copies_of(road_layers)
+
+    def taper_of(f):
+        return roadsmod.road_tapers(f, urban_fn, widths, left_hand)
     for f in road_layers:
         if f is None or not len(f):
             continue
@@ -1840,6 +1845,7 @@ def road_corridors(frame, road_layers, x0, y0, elev, margin=50.0, size=256.0,
             if sp is None or sp.cls not in THROUGH_CLASSES or fid in seen:
                 continue
             seen.add(fid)
+            tapers = roadsmod.joint_desc(copies[fid], taper_of)
             for ll in roadsmod.ground_parts(f, i):
                 if len(ll) < 2:
                     continue
@@ -1848,7 +1854,9 @@ def road_corridors(frame, road_layers, x0, y0, elev, margin=50.0, size=256.0,
                 h = np.asarray(elev(ll[:, 1], ll[:, 0]), np.float64)
                 z = np.asarray(frame.geodetic_to_enu(ll[:, 1], ll[:, 0], h)[2], np.float64)
                 if np.isfinite(z).all():
-                    out.append((xy, z, sp.width))
+                    ws = roadsmod.taper_widths(sp.width, tapers, ll[:, 0], ll[:, 1])
+                    segment_widths = sp.width if ws is None else (ws[:-1] + ws[1:]) / 2
+                    out.append((xy, z, segment_widths))
     return out
 
 
@@ -1857,13 +1865,14 @@ ROAD_TRIM_SHARE = 0.35        # never erase a mapped urban block to make a specu
 
 
 def _clearance_segments(corridors):
-    """Flat segment arrays shared by every footprint in a tile."""
+    """Flat segment arrays shared by every footprint in a tile; widths can be scalar or per source segment."""
     if not corridors:
         return None
     a = np.concatenate([xy[:-1] for xy, _, _ in corridors])
     b = np.concatenate([xy[1:] for xy, _, _ in corridors])
     z = np.concatenate([np.column_stack([zz[:-1], zz[1:]]) for _, zz, _ in corridors])
-    half = np.concatenate([np.full(len(xy) - 1, w / 2) for xy, _, w in corridors])
+    half = np.concatenate([np.broadcast_to(np.asarray(w, np.float64), (len(xy) - 1,)) / 2
+                           for xy, _, w in corridors])
     boxes = np.column_stack([np.minimum(a, b) - half[:, None], np.maximum(a, b) + half[:, None]])
     return a, b, z, half, boxes
 
@@ -1871,14 +1880,14 @@ def _clearance_segments(corridors):
 def _clear_road(spec, gmin, gmax, segments):
     """Trim a grounded roadside wall to its actual carriageway edge, never delete the building.
 
-    Explicit elevated parts, inferred through-buildings, bridge structures, parking decks and toll infrastructure
-    retain their existing passages/clearance. Only a minority edge overlap with two boundary crossings is safe to
+    Explicit elevated parts, inferred through-buildings, bridge structures, parking decks, ships, quays and toll
+    infrastructure retain their existing geometry. Only a minority edge overlap with two boundary crossings is safe to
     trim: an uncertain through-building or disconnected remainder is not converted into an invented urban block.
     The centreline must span the complete footprint, so a short segment's infinite extension cannot shave a house.
     """
     if (segments is None or (spec.min_h or 0) > 0.5 or spec.portal or spec.deck
             or spec.cls in BRIDGE_CLASSES or spec.cls in ("bridge_part", "bridge_pier", "toll_booth")
-            or spec.cls in ("roof", "shelter", "carport")):
+            or spec.cls in ("roof", "shelter", "carport", "ship", "pier")):
         return
     a, b, z, half, boxes = segments
     ring = np.asarray(drawn_ring(spec), np.float64)
