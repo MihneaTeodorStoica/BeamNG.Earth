@@ -683,9 +683,20 @@ def junction_nodes(frame, feats, parts):
     for fid, _spec, line in parts:
         row = []
         lo, hi = np.min(line[:, :2], axis=0) - 1e-10, np.max(line[:, :2], axis=0) + 1e-10
+        # Establish membership on the original piece, not on the plan's resampling chords. At a
+        # right-angle source vertex a valid connector can be sqrt(2) m from a 4 m plan chord.
+        scale = np.array([111320.0 * math.cos(math.radians(float(np.mean(line[:, 1])))), 111320.0])
+        origin = np.asarray(line[0, :2], np.float64)
+        xy = (np.asarray(line[:, :2], np.float64) - origin) * scale
+        delta = np.diff(xy, axis=0)
+        ll = np.maximum((delta * delta).sum(axis=1), 1e-12)
         for name, point in markers[fid]:
             if (point < lo).any() or (point > hi).any():
                 continue
+            q = (point - origin) * scale
+            t = np.clip(((q - xy[:-1]) * delta).sum(axis=1) / ll, 0.0, 1.0)
+            if np.linalg.norm(xy[:-1] + t[:, None] * delta - q, axis=1).min() > 0.05:
+                continue        # outside this original ground/clipped piece, even if inside its box
             end = 0 if np.allclose(point, line[0, :2], rtol=0, atol=1e-10) else \
                 1 if np.allclose(point, line[-1, :2], rtol=0, atol=1e-10) else -1
             row.append((name, point, end))
