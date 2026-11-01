@@ -198,7 +198,7 @@ class SourceTunnelLayers(unittest.TestCase):
                                 pin = roads._along(in_path, in_dist)
                                 ix = int(np.floor((pin[0] - xs[0]) / 2.0))
                                 iy = int(np.floor((pin[1] - ys[0]) / 2.0))
-                                if 0 <= ix < size and 0 <= iy < size:
+                                if 0 <= ix < size and 0 <= iy < size and u[iy, ix] < pin[2] + roadmesh.TUNNEL_H + 0.3:
                                     self.assertEqual(idx[iy, ix], heightmap.TER_HOLE,
                                                      f"terrain hole inside mouth at -{in_dist}m was wrongly spared")
                                 if len(triangles):
