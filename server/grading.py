@@ -708,7 +708,7 @@ def snap_junctions(plans, specs, nodes):
     if not plans:
         return
     import fast
-    fast.require(124, "the junctions' topology")
+    fast.require(126, "the junctions' topology")
     n = [len(p.xy) for p in plans]
     off = np.concatenate([[0], np.cumsum(n)]).astype(np.int64)
     xy = np.ascontiguousarray(np.concatenate([np.asarray(p.xy, np.float64)[:, :2] for p in plans]).reshape(-1, 2))
