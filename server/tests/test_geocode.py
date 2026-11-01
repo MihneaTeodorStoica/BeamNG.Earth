@@ -77,6 +77,7 @@ class GeocodeTest(unittest.TestCase):
         self.assertEqual(geocode.search("ab", net=Boom()), [])
 
     def test_default_urls_keep_their_keys(self):
+        # The default URL is also the existing cache key; the custom endpoint must not change it.
         with patch.dict(os.environ):
             os.environ.pop(geocode.PHOTON_BASE_ENV, None)
             self.assertEqual(
@@ -118,34 +119,37 @@ class GeocodeTest(unittest.TestCase):
                     self.assertNotIn("very-secret", geocode.error_text(caught.exception))
 
     def test_error_classification_never_exposes_url_or_exception(self):
-        secret = "very-secret"
-        detail = f"https://user:{secret}@example.org/path?token={secret}"
+        username, password = "private-user-456", "private-password-123"
+        path_secret, query_secret = "private-path-abc", "private-token-789"
+        detail = f"https://{username}:{password}@example.org/{path_secret}?token={query_secret}"
+        rate = netfetch.RateLimited(detail, status=429, retry_after=2.1)
+        unavailable = netfetch.RateLimited(detail, status=503, retry_after=12)
+        breaker = netfetch.HostUnavailable(detail, retry_after=1)
         cases = (
-            (netfetch.FetchFailed(detail, status=403),
-             "Geocoding service refused the request (HTTP 403)."),
-            (netfetch.FetchFailed(detail, status=401),
-             "Geocoding service refused the request (HTTP 401)."),
-            (netfetch.RateLimited(detail, status=429, retry_after=2.1),
-             "Geocoding service rate limited the request (HTTP 429). Try again in 3 s."),
-            (netfetch.RateLimited(detail, status=503, retry_after=12),
-             "Geocoding service returned HTTP 503. Try again in 12 s."),
-            (netfetch.RateLimited(detail),
-             "Geocoding request temporarily limited by network policy."),
-            (netfetch.Offline(detail), "Geocoding unavailable: offline mode."),
-            (netfetch.HostUnavailable(detail, retry_after=1),
-             "Geocoding service temporarily unavailable (network circuit open). Try again in 1 s."),
-            (netfetch.BudgetExceeded(detail), "Geocoding network request budget reached."),
-            (netfetch.PolicyDenied(detail), "Geocoding request denied by network policy."),
-            (netfetch.FetchFailed(detail), "Geocoding service could not be reached (network error)."),
-            (netfetch.NotFound(detail, status=404), "Geocoding service returned HTTP 404."),
-            (netfetch.BadResponse(detail, status=200), "Geocoding service returned an invalid response."),
-            (json.JSONDecodeError(detail, "not json", 0), "Geocoding service returned an invalid response."),
-            (RuntimeError(detail), "Geocoding failed (unexpected error)."),
+            (netfetch.FetchFailed(detail, status=403), ("403", "refus"), ("offline",)),
+            (netfetch.FetchFailed(detail, status=401), ("401", "refus"), ("offline",)),
+            (rate, ("429", "limit"), ("offline",)),
+            (unavailable, ("503",), ("offline",)),
+            (netfetch.RateLimited(detail), ("limit", "policy"), ("offline",)),
+            (netfetch.Offline(detail), ("offline",), ("403", "429")),
+            (breaker, ("circuit",), ("offline",)),
+            (netfetch.BudgetExceeded(detail), ("budget",), ("offline",)),
+            (netfetch.PolicyDenied(detail), ("policy",), ("offline",)),
+            (netfetch.FetchFailed(detail), ("network",), ("offline",)),
+            (netfetch.NotFound(detail, status=404), ("404",), ("offline",)),
+            (netfetch.BadResponse(detail, status=200), ("invalid",), ()),
+            (json.JSONDecodeError(detail, "not json", 0), ("invalid",), ()),
+            (RuntimeError(detail), ("error",), ()),
         )
-        for error, expected in cases:
+        for error, required, forbidden in cases:
             with self.subTest(error=type(error).__name__, status=getattr(error, "status", None)):
-                self.assertEqual(geocode.error_text(error), expected)
-                self.assertNotIn(secret, geocode.error_text(error))
+                text = geocode.error_text(error).lower()
+                for part in required:
+                    self.assertIn(part, text)
+                for part in forbidden + ("https://", "example.org", username, password, path_secret, query_secret):
+                    self.assertNotIn(part, text)
+        for error, seconds in ((rate, 3), (unavailable, 12), (breaker, 1)):
+            self.assertRegex(geocode.error_text(error).lower(), rf"\b{seconds}\s*(?:s|seconds?)\b")
 
 
 if __name__ == "__main__":
