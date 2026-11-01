@@ -2846,8 +2846,7 @@ def deck_profile_once(lines, ground_fn, crossings=(), clear=None, grade=None, li
     # (curve mode for a deck that clears something; one over nothing but the ground keeps the ground envelope's rounded
     # crest: Lombard Street, Baltimore's deck over its embankment, test_no_step_onto_a_steep_abutment)
     if curve and lines and bridge_profile_mode() == "curve" and len(crossings):
-        cl, cg = _unpinned(lines, ground_fn, pins)
-        got = deck_curve(cl, cg, _curve_crossings(crossings, n_road, levels), (), clear, lift)
+        got = deck_curve(lines, ground_fn, _curve_crossings(crossings, n_road, levels), (), clear, lift, pins=pins)
         if got is not None:
             g = _curve_grade(lines, got)
             if g <= DECK_STEEP_GRADE or _end_step(lines, got) <= DECK_STEEP_GRADE:
@@ -3006,9 +3005,9 @@ def _upper_hull(s, z):
     return h
 
 
-def _simple_path(lines):
+def _simple_path(lines, graph=None):
     """[(edge index, reversed)] in order along the chain if the parts form one open path, else None."""
-    nodes, edges, adj = _chain_graph(lines)
+    nodes, edges, adj = _chain_graph(lines) if graph is None else graph
     deg = np.zeros(len(nodes), int)
     for a, b, _ in edges:
         deg[a] += 1
@@ -3219,23 +3218,25 @@ def _path_curve(lines, order, ground_fn, crossings, spans, clear, lift, max_grad
     return out, xy, s, z
 
 
-def deck_curve(lines, ground_fn, crossings=(), spans=(), clear=None, lift=None, max_grade=None):
+def deck_curve(lines, ground_fn, crossings=(), spans=(), clear=None, lift=None, max_grade=None, pins=None):
     """Deck heights (one array per part) of a bridge chain by curve_profile. A chain of parts in one line is
     solved as one profile; a branched chain (ramps leaving a viaduct) as its longest abutment-to-abutment
     line first, then each remaining branch from the solved deck it leaves (its height and grade there) to
     its own abutment or the deck it rejoins. None when the chain has no abutment (a closed loop). crossings:
     (part, arc m, height under it[, its own clearance]) roads and water under it (held `clear`, or their own
-    clearance, over +-DECK_ROAD_HALF); spans: (part, arc from, arc to, min deck height). Pure given ground_fn."""
+    clearance, over +-DECK_ROAD_HALF); spans: (part, arc from, arc to, min deck height). pins: joints at ground
+    roads, split into independent abutments in the graph without moving the mapped geometry. Pure given ground_fn."""
     clear = DECK_ROAD_CLEAR if clear is None else clear
     lift = DECK_CLEAR if lift is None else lift
     if not lines:
         return None
     args = (ground_fn, crossings, spans, clear, lift, max_grade)
-    order = _simple_path(lines)
+    graph = _curve_graph(lines, pins)
+    order = _simple_path(lines, graph)
     if order is not None:
         got = _path_curve(lines, order, *args)
         return None if got is None else [got[0][k] for k in range(len(lines))]
-    nodes, edges, adj = _chain_graph(lines)
+    nodes, edges, adj = graph
     # parts not joined at all (a chain also holds the decks crossing it, solved together for the deck-over-deck
     # rule): each joined group on its own (2026-10-19: one crossing deck sent a whole interchange to the legacy
     # profile)
@@ -3257,10 +3258,11 @@ def deck_curve(lines, ground_fn, crossings=(), spans=(), clear=None, lift=None, 
             idx = {k: i for i, k in enumerate(ks)}
             sub = deck_curve([lines[k] for k in ks], ground_fn,
                              [(idx[cr[0]],) + tuple(cr[1:]) for cr in crossings if cr[0] in idx],
-                             [(idx[k], a0, a1, z) for k, a0, a1, z in spans if k in idx], clear, lift, max_grade)
+                             [(idx[k], a0, a1, z) for k, a0, a1, z in spans if k in idx], clear, lift, max_grade, pins)
             if sub is None:
                 sub = deck_profile_once([lines[k] for k in ks], ground_fn,
-                                        [(idx[cr[0]],) + tuple(cr[1:]) for cr in crossings if cr[0] in idx], clear, None, lift)
+                                        [(idx[cr[0]],) + tuple(cr[1:]) for cr in crossings if cr[0] in idx], clear, None,
+                                        lift, pins=pins)
                 if bridge_profile_mode() == "curve" and sub is not None and any(
                         s is None for s in sub):
                     return None
@@ -3569,56 +3571,39 @@ PIN_M = 1.0             # m: a ground road's end this near a joint of decks make
 PIN_ROAD_M = 20.0       # ... a road at least this long (a shorter piece between decks is a gap in the map's bridge tags)
 
 
-PIN_SPLIT_M = 0.7      # m between the ends of the parts at a pinned joint as _unpinned parts them (> _EndJoin's 0.5)
+def _curve_graph(lines, pins):
+    """The deck graph with each incident end at a ground pin its own abutment.
 
-
-def _unpinned(lines, ground_fn, pins):
-    """(lines, ground_fn) for deck_curve with each joint at pins (_pin: a ground road goes on from it) made an end of
-    each part there: their ends moved PIN_SPLIT_M apart (one more step east each), ground_fn giving the ground at the
-    joint itself there. deck_curve's graph joined them, the path went through the joint, and the ground road went on
-    from it 8.5 m under the deck (Charles Street over I-83 in Baltimore: the AI crashed at the step, 2026-10-29). The
-    heights stay one per point of each line. Pure."""
-    if pins is None or not len(pins) or len(lines) < 2:
-        return lines, ground_fn
-    nodes, edges, _adj = _chain_graph(lines)
-    deg = np.zeros(len(nodes), int)
-    for a, b, _ in edges:
-        deg[a] += 1
-        deg[b] += 1
+    Splitting by displacing endpoints east could join a different nearby deck instead, leaving the real
+    junction elevated. It also changed arc lengths and approach tangents according to part order and bearing.
+    Only connectivity changes here; clearance arcs and physical/rendered polylines keep their mapped positions.
+    """
+    nodes, edges, adj = _chain_graph(lines)
+    if pins is None or not len(pins):
+        return nodes, edges, adj
+    deg = np.array([len(neighbours) for neighbours in adj])
     pinned = _pin(nodes, deg, pins)
-    split = [i for i in range(len(nodes)) if deg[i] > 1 and pinned[i] == 1]
-    if not split:
-        return lines, ground_fn
-    out = [np.array(ln, np.float64, copy=True) for ln in lines]
-    moved = []                      # (moved point, the joint)
-    for nd in split:
-        q = np.asarray(nodes[nd], np.float64)
-        n = 0
-        for k, (a, b, _s) in enumerate(edges):
-            for at, end in ((0, a), (-1, b)):
-                if end != nd:
+    split = (deg > 1) & (pinned == 1)
+    if not split.any():
+        return nodes, edges, adj
+    seen = set()
+    out = []
+    for a, b, s in edges:
+        ends = []
+        for nd in (a, b):
+            if split[nd]:
+                if nd in seen:
+                    nodes.append(nodes[nd])
+                    ends.append(len(nodes) - 1)
                     continue
-                n += 1
-                if n == 1:
-                    continue        # (the first part keeps the joint's point)
-                out[k][at, 0] = q[0] + PIN_SPLIT_M * (n - 1)
-                out[k][at, 1] = q[1]
-                moved.append((out[k][at, :2].copy(), q))
-    if not moved:
-        return lines, ground_fn
-    M = np.array([m for m, _ in moved], np.float64)
-    Q = np.array([q for _, q in moved], np.float64)
-
-    def ground_at(xy):
-        xy = np.asarray(xy, np.float64).reshape(-1, 2)
-        hit = np.full(len(xy), -1)
-        for j, m in enumerate(M):
-            hit[(np.abs(xy[:, 0] - m[0]) < 1e-6) & (np.abs(xy[:, 1] - m[1]) < 1e-6)] = j
-        if not (hit >= 0).any():
-            return ground_fn(xy)
-        q = np.where((hit >= 0)[:, None], Q[np.maximum(hit, 0)], xy)
-        return ground_fn(q)
-    return out, ground_at
+                seen.add(nd)
+            ends.append(nd)
+        out.append((ends[0], ends[1], s))
+    adj = [[] for _ in nodes]
+    for a, b, s in out:
+        adj[a].append((b, s[-1]))
+        adj[b].append((a, s[-1]))
+    return nodes, out, adj
 
 
 def _pin(nodes, deg, pins):

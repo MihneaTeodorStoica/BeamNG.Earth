@@ -9,6 +9,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import bridgetypes  # noqa: E402
 import roads  # noqa: E402
+import roadmesh  # noqa: E402
 
 
 def kink(z, step):
@@ -136,6 +137,89 @@ class CurveProfile(unittest.TestCase):
             else:
                 os.environ["BNE_BRIDGE_PROFILE"] = old
         self.assertFalse(np.allclose(leg[0], new[0]))
+
+
+class PinnedGeometry(unittest.TestCase):
+    """A pinned junction beside a separate uphill deck, 0.7 m east.
+
+    The former artificial pin split moved the second endpoint onto that uphill deck.
+    It lost its ground pin and carried the uphill deck's height onto the approach.
+    All coordinates here are synthetic metres, not a claim to replay any reported site.
+    """
+
+    @staticmethod
+    def fixture():
+        a = line(-400, 0)
+        b = np.c_[np.zeros(101), np.linspace(0.0, 400.0, 101)]
+        c = np.c_[np.full(101, 0.7), np.linspace(0.0, -400.0, 101)]
+        ground = lambda xy: 10.0 + 0.05 * np.maximum(-xy[:, 1], 0.0)
+        return [a, b, c], ground, [(1, 200.0, 10.0)]
+
+    def test_nearby_unconnected_deck_cannot_steal_ground_pin(self):
+        lines, ground, crossings = self.fixture()
+        zs = roads.deck_profile(lines, ground, crossings, pins=[(0.0, 0.0)])
+        for k, (xy, z) in enumerate(zip(lines, zs)):
+            cr = [(0,) + tuple(c[1:]) for c in crossings if c[0] == k]
+            independent = roads.deck_curve([xy], ground, cr)[0]
+            np.testing.assert_allclose(z, independent, atol=1e-8)
+            np.testing.assert_allclose(z[[0, -1]], ground(xy[[0, -1]]), atol=1e-8)
+            self.assertLessEqual(roads._curve_grade([xy], [z]), roads.DECK_MAX_GRADE + 0.01)
+        self.assertEqual(roads._clearance_deficits(lines, zs, crossings), [])
+        nodes, edges, _ = roads._curve_graph(lines, [(0.0, 0.0)])
+        self.assertNotEqual(edges[0][1], edges[1][0], "the ground junction is split")
+        self.assertNotEqual(edges[1][0], edges[2][0], "the deck 0.7 m away is still separate")
+        np.testing.assert_allclose(nodes[edges[1][0]], lines[1][0])
+
+    def test_pin_is_invariant_to_order_direction_and_bearing(self):
+        lines, ground, crossings = self.fixture()
+        reference = roads.deck_profile(lines, ground, crossings, pins=[(0.0, 0.0)])
+        for angle in (0.0, 0.7, np.pi / 2):
+            rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+            transformed = [xy[::-1] @ rotation.T for xy in lines[::-1]]
+            transformed_ground = lambda xy: ground(xy @ rotation)
+            got = roads.deck_profile(transformed, transformed_ground, crossings, pins=[(0.0, 0.0)])
+            # The crossing lies at the middle of the middle part, so its index and arc are unchanged.
+            for a, b in zip(reference, got[::-1]):
+                np.testing.assert_allclose(a, b[::-1], atol=0.01)
+
+    def test_explicit_water_clearance_stays_on_its_mapped_span(self):
+        lines, ground, _ = self.fixture()
+        crossing = [(1, 200.0, 10.0, 8.0)]
+        zs = roads.deck_profile(lines, ground, crossing, pins=[(0.0, 0.0)])
+        self.assertGreaterEqual(float(zs[1][50]), 18.0 - 0.05)
+        self.assertAlmostEqual(zs[1][0], 10.0, places=8)
+        independent = roads.deck_curve([lines[2]], ground)[0]
+        np.testing.assert_allclose(zs[2], independent, atol=1e-8)
+
+    def test_surface_barriers_and_collision_keep_the_pinned_approach(self):
+        from test_roads import FRAME
+        lines, ground, crossings = self.fixture()
+        zs = roads.deck_profile(lines, ground, crossings, pins=[(0.0, 0.0)])
+        spec = roads.Spec(8.0, "paved", False, "secondary")
+        chunks = roads._deck_chunks([("approach", spec, np.c_[lines[1], zs[1]], 0.0)],
+                                    (-10.0, -1.0, 10.0, 401.0), ground)
+        chunks = [c for c in chunks if c.get("deck") and not c.get("ctx")]
+        self.assertTrue(chunks)
+        for c in chunks:
+            left, right, _, _, _, h = roadmesh.ribbons([c])[0]
+            xy = (left + right) / 2
+            expected = np.interp(xy[:, 1], lines[1][:, 1], zs[1])
+            np.testing.assert_allclose(h, expected, atol=roads.SIMPLIFY_Z_M + 0.002)
+            surface, *_ = roadmesh.build(FRAME, [c], None, (0.0, 0.0, 0.0))
+            collision, *_ = roadmesh.deck([c], (0.0, 0.0, 0.0))
+            np.testing.assert_allclose(surface[:len(h), 2], h + roadmesh.DECK_SKIN)
+            for edge in (left, right):
+                for point, height in zip(edge, h):
+                    d = np.linalg.norm(collision[:, :2] - point, axis=1)
+                    self.assertTrue(np.any(np.isclose(collision[d < 0.1, 2], height, atol=1e-5)))
+            runs = roadmesh.parapet_runs([c])
+            self.assertTrue(runs)
+            for run in runs:
+                expected = np.interp(run["mid"][:, 1], lines[1][:, 1], zs[1])
+                np.testing.assert_allclose(run["z"], expected, atol=roads.SIMPLIFY_Z_M + 0.002)
+        near = [c for c in chunks if abs(float(c["n"][0][1])) < 1e-6]
+        self.assertTrue(near)
+        self.assertAlmostEqual(near[0]["n"][0][2], 10.0, places=3)
 
 
 class NavPlausible(unittest.TestCase):
