@@ -245,6 +245,19 @@ local function msgSlot(msg, what)
   return { n, serial, session, path = e[1] }
 end
 
+-- Pooled shapes of other modules (terrain.lua's fine ground): the slot record of a pooled path and its serial (nil: not
+-- pooled), an object made with it, and the slot let go (with its object id when one was made).
+function M.pooledSlot(path, serial)
+  local n = slotOf(path)
+  if not n or not tonumber(serial) then return nil end
+  return { n, tonumber(serial), session }
+end
+function M.pooledMade(id, path) slotMade(id, path) end
+function M.pooledRelease(sl, id)
+  if sl then slotDrop(sl) end
+  if id then slotObjGone(id) end
+end
+
 -- The [slot, serial] pairs gone since the last call, for server session `sess`.
 function M.takeSlotsGone(sess)
   if #slotsGone == 0 then return {} end

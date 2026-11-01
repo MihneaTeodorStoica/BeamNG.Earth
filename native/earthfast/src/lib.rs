@@ -1,6 +1,7 @@
 //! Geometry kernels for the world server (server/fast.py wraps them, with the Python versions as the fallback).
 //! All coordinates are metres in the anchor's local frame, f64.
 mod gpu;
+mod finepatch;
 mod dsm;
 mod vegmask;
 mod roadgeom;
@@ -1410,6 +1411,7 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
                      za: PyReadonlyArray1<'py, f64>, zb: PyReadonlyArray1<'py, f64>, h: PyReadonlyArray1<'py, f64>,
                      rh: PyReadonlyArray1<'py, f64>, rid: PyReadonlyArray1<'py, i64>, abut: PyReadonlyArray1<'py, u8>, cut: PyReadonlyArray2<'py, f64>,
                      ba: PyReadonlyArray1<'py, f64>, bb: PyReadonlyArray1<'py, f64>, steep: PyReadonlyArray1<'py, u8>,
+                     link: PyReadonlyArray1<'py, u8>, extrap: f64,
                      lift: f64, slope_run: f64, t_min: f64, t_max: f64, steep_run: f64, steep_t_min: f64, blend_r: f64,
                      bucket: f64, wall_cut: f64, wall_t: f64, wall_flat: f64, wall_ahead: f64,
                      sep: bool, sep_from: f64, sep_full: f64, core_fade: f64, side_fade: f64, sharp_step: f64)
@@ -1424,6 +1426,11 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
     // (segments): a mountain pass road's (grading.Plan.steep): its sides fall to the natural ground at steep_run, from
     // steep_t_min, between its retaining wall and its parapet
     let steep = steep.as_array();
+    // (segments): bit 0 the plan goes on before it, bit 1 after it. A point past such an end takes the segment's line
+    // carried on (up to extrap m), not its end height: on a grade the ends' heights blended in, before and after, made
+    // a washboard of the plan's vertex step (4 m, +-3.5 cm on the Stelvio's 10 %; the user, 2026-11-01: "the road
+    // still feels bumpy"). A plan's own end (a dead end, a cell's edge) keeps its end height.
+    let link = link.as_array();
     let banked: Vec<bool> = (0..h.len()).map(|s| ba[s] != 0.0 || bb[s] != 0.0).collect();
     let sharp = cut.iter().any(|v| v.is_finite());
     let has_cut: Vec<bool> = (0..h.len()).map(|s| (0..6).any(|k| cut[[s, k]].is_finite())).collect();
@@ -1512,6 +1519,13 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
                     let (ddx, ddy) = (qx - t * abx, qy - t * aby);
                     let d = (ddx * ddx + ddy * ddy).sqrt();       // (not hypot: libm's is ~5x dearer, the pairs loop's main cost)
                     let mut target = za[s] + (zb[s] - za[s]) * t;
+                    if link[s] != 0 && l2 > 1e-12 {
+                        let tu = (qx * abx + qy * aby) / l2;
+                        let e = extrap / l2.sqrt();
+                        let lo = if link[s] & 1 != 0 { -e } else { 0.0 };
+                        let hi = if link[s] & 2 != 0 { 1.0 + e } else { 1.0 };
+                        target = za[s] + (zb[s] - za[s]) * tu.clamp(lo, hi);
+                    }
                     if banked[s] && l2 > 1e-12 {    // (a banked curve: tilted across the carriageway, its edge height past)
                         let off = ((qy * abx - qx * aby) / l2.sqrt()).clamp(-rh[s], rh[s]);
                         target += (ba[s] + (bb[s] - ba[s]) * t) * off;
@@ -5251,6 +5265,11 @@ fn earthfast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(decks::deck_beside, m)?)?;
     m.add_function(wrap_pyfunction!(decks::deck_end_joins, m)?)?;
     m.add_function(wrap_pyfunction!(tapers::road_tapers, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_holes, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_rim, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_points, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_mesh, m)?)?;
     m.add_function(wrap_pyfunction!(tapers::lane_flow, m)?)?;
     m.add_function(wrap_pyfunction!(tapers::lane_shifts, m)?)?;
     m.add_function(wrap_pyfunction!(decks::deck_gaps, m)?)?;
@@ -5390,6 +5409,6 @@ fn earthfast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fartex::season_img, m)?)?;
     m.add_function(wrap_pyfunction!(fartex::dds_levels, m)?)?;
     m.add_function(wrap_pyfunction!(fartex::jpeg_rgb, m)?)?;
-    m.add("VERSION", 123)?;
+    m.add("VERSION", 125)?;
     Ok(())
 }

@@ -375,6 +375,8 @@ def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None,
     if ter_name is not None:
         t1 = time.perf_counter()
         idx = _tunnel_holes(aid, frame, elev, keep, cx, cy, idx, info, g)
+        import finepatch            # (sharp graded ground: holes here, a finer mesh beside the .ter fills them)
+        idx = finepatch.apply(frame, gen, raw, keep, cx, cy, size, out_dir, ter_name[:-4] + "_fine", aid, idx, info)
         info["ter"], mats = surfacemod.write_ter(out_dir, ter_name, keep["qgrid"], idx)
         if mats is not None:          # the .ter's own material list (MATERIALS indices)
             info["mats"] = mats

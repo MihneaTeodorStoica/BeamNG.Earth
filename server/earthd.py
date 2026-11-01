@@ -2137,6 +2137,10 @@ class Server:
             info["roadsComplete"] = roads_complete
         if not provisional:
             idx = self._tunnel_holes(anchor, elev, keep, cx, cy, idx, info)
+            import finepatch        # (sharp graded ground: holes here, a finer mesh beside the .ter fills them)
+            raw = lambda la, lo: self.ground(anchor.frame, la, lo, self.dem.sample(la, lo, anchor.hm_zoom))  # noqa: E731
+            idx = finepatch.apply(anchor.frame, gen, raw, keep, cx, cy, self.layout.block, self.out_dir,
+                                  self.ter_name((anchor.id, cx, cy))[:-4] + "_fine", anchor.id, idx, info)
         info["ter"], mats = surfacemod.write_ter(self.out_dir, self.ter_name((anchor.id, cx, cy)), keep["qgrid"], idx)
         if mats is not None:          # the .ter's own material list (MATERIALS indices)
             info["mats"] = mats
@@ -2697,6 +2701,8 @@ class Server:
                 self._remove(os.path.join(self.out_dir, info["base"]))
             if info.get("ter"):
                 self._remove(os.path.join(self.out_dir, info["ter"]))
+            for p in (info.get("fine") or {}).get("parts", ()):     # (its fine ground's pieces)
+                self._remove(os.path.join(self.out_dir, p["shape"]))
             if self.near_visual == "detail":     # its packed copies in the game's terrain texture cache
                 for name in {self.base_name(key), info.get("base") or self.base_name(key)}:
                     for px in BASE_SIZES:       # (whichever size it was made at)
@@ -4564,6 +4570,18 @@ class Connection:
             out["baseSize"] = self.s.layout.block * heightmap.SQUARE
         if info.get("ter"):         # the same block as the engine's terrain file (swapped in, no import)
             out["ter"] = f"{self.s.vfs_dir}/{info['ter']}"
+        if info.get("fine"):        # its fine ground's pieces (finepatch.py: the .ter's holes filled by them)
+            f = info["fine"]
+            parts = [{**p, "shape": f"{self.s.vfs_dir}/{p['shape']}"} for p in f["parts"]]
+            # (as pooled shape paths, slot_<n>: ~75 new shapes a block, each distinct path a cost for the rest of the
+            # game's session, teleport-degradation; the mod reports each slot gone with its object, pose.slotsGone)
+            pool = getattr(self.s, "pool_shapes", None)
+            slots = pool(self, {str(i): p["shape"] for i, p in enumerate(f["parts"])}) if pool else {}
+            for i, p in enumerate(parts):
+                sl = slots.get(str(i))
+                if sl:
+                    p["shape"], p["slot"] = sl[0], sl[1]
+            out["fine"] = {"materials": f["materials"], "bank": f["bank"], "parts": parts}
         return out
 
     async def prepare_anchor(self, msg):

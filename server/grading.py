@@ -68,6 +68,9 @@ MOUNTAIN_SHOULDER_M = 0.5   # ... beside a mountain pass road (roads._mountain_r
 # A mountain pass road's sides (Plan.steep): back to the natural ground at 1:STEEP_RUN over STEEP_T_MIN m at the least,
 # not SLOPE_RUN / T_MIN's long fill and cut slopes (on the Stelvio they made a 20 m bench of a 6 m road between its wall
 # and its parapet, the parapet's drop never within its reach: roads.PARAPET_*)
+LINK_TURN_DEG = 20.0        # (PlanPack: two plans' ends at one point within this of straight on: one road going on)
+EXTRAP_M = float(os.environ.get("BNE_GRADE_EXTRAP", "4"))             # m a segment's line is carried on past an end where its plan goes on (grade_points: no
+                            # washboard of the vertex step on a grade)
 STEEP_RUN = 0.5
 STEEP_T_MIN = 1.5
 SIDEWALK_MARGIN_M = 0.5     # m of flat ground beyond a sidewalk (roads.SIDEWALK_CLASSES)
@@ -2547,6 +2550,35 @@ class PlanPack:
         self.ab = ab.astype(np.uint8)
         self.cut = cut
         self.st = np.repeat(np.array([bool(getattr(p, "steep", False)) for _k, p in rows], np.uint8), nseg)
+        # each segment's link: bit 0 its plan goes on before it, bit 1 after it (grade_points' EXTRAP_M); a plan's end
+        # where another plan's end lies and the road carries straight on through it (outward directions within
+        # LINK_TURN_DEG of opposite) goes on too: one road planned per map cell, a road renamed at a point
+        first = np.zeros(int(nseg.sum()), bool)
+        last = np.zeros(int(nseg.sum()), bool)
+        ends = np.cumsum(nseg)
+        first[(ends - nseg)[nseg > 0]] = True
+        last[(ends - 1)[nseg > 0]] = True
+        at = {}
+        for n, (_k, p) in enumerate(rows):
+            if nseg[n] <= 0:
+                continue
+            P = np.asarray(p.xy, f64)[:, :2]
+            for e, (q, nb) in enumerate(((P[0], P[1]), (P[-1], P[-2]))):
+                d = q - nb
+                ln = float(np.hypot(*d))
+                if ln > 1e-9:
+                    at.setdefault((round(float(q[0]), 1), round(float(q[1]), 1)), []).append((n, e, d / ln))
+        cos_min = -math.cos(math.radians(LINK_TURN_DEG))
+        for group in at.values():
+            if len(group) < 2:
+                continue
+            for n, e, d in group:
+                if any(m != n and float(d @ d2) <= cos_min for m, _e2, d2 in group):
+                    if e == 0:
+                        first[ends[n] - nseg[n]] = False
+                    else:
+                        last[ends[n] - 1] = False
+        self.lk = ((~first).astype(np.uint8) | ((~last).astype(np.uint8) << 1)).astype(np.uint8)
         self.box = np.array([p.bbox for _k, p in rows], f64).reshape(-1, 4)
         self.of = np.repeat(np.arange(self.n), nseg)
 
@@ -2559,10 +2591,11 @@ class PlanPack:
         if not keep.any():
             return None
         if keep.all():
-            return self.a, self.b, self.za, self.zb, self.h, self.rh, self.rid, self.ab, self.cut, self.ba, self.bb, self.st
+            return self.a, self.b, self.za, self.zb, self.h, self.rh, self.rid, self.ab, self.cut, self.ba, self.bb, self.st, \
+                self.lk
         sk = keep[self.of]
         return tuple(np.ascontiguousarray(v[sk]) for v in (self.a, self.b, self.za, self.zb, self.h, self.rh, self.rid,
-                                                           self.ab, self.cut, self.ba, self.bb, self.st))
+                                                           self.ab, self.cut, self.ba, self.bb, self.st, self.lk))
 
 
 def grade_points(px, py, base, plans, lift=0.0):
@@ -2580,13 +2613,13 @@ def grade_points(px, py, base, plans, lift=0.0):
     got = pack.near(px.min(), py.min(), px.max(), py.max())
     if got is None:
         return out
-    A, B, ZA, ZB, H, RH, RID, AB, CUT, BA, BB, ST = got
+    A, B, ZA, ZB, H, RH, RID, AB, CUT, BA, BB, ST, LK = got
     import fast
-    fast.require(123, "grade_points")        # (the Rust loop: native/earthfast; its mountain roads' steep sides: 123)
+    fast.require(125, "grade_points")        # (the Rust loop: native/earthfast; its segments' links: 125)
     f64 = np.float64
     return fast._ef.grade_points(np.ascontiguousarray(px, f64), np.ascontiguousarray(py, f64),
-                                 np.ascontiguousarray(base, f64), A, B, ZA, ZB, H, RH, RID, AB, CUT, BA, BB, ST,
-                                 float(lift), float(SLOPE_RUN), float(T_MIN), float(T_MAX), float(STEEP_RUN),
+                                 np.ascontiguousarray(base, f64), A, B, ZA, ZB, H, RH, RID, AB, CUT, BA, BB, ST, LK,
+                                 float(EXTRAP_M), float(lift), float(SLOPE_RUN), float(T_MIN), float(T_MAX), float(STEEP_RUN),
                                  float(STEEP_T_MIN), float(BLEND_R), float(BUCKET),
                                  float(WALL_CUT_M), float(WALL_T_M), float(WALL_FLAT_M), float(WALL_AHEAD_M),
                                  bool(SEP_ON), float(SEP_FROM_M), float(SEP_FULL_M), float(CORE_FADE_M),

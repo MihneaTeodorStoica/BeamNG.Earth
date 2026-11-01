@@ -383,13 +383,13 @@ local function loadBlock(tr)
   local base = nil
   if nearVisual == 'detail' then base = type(tr.base) == 'string' and tr.base or false end
   local ter = M.TER_SWAP and type(tr.ter) == 'string'
-  if ter and terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) then
+  if ter and terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize), tr.fine) then
     roads.terrainSwapped()      -- its collision follows by itself next frame: no other rebuild meanwhile
     groundcover.afterBlockChange()
     return true, nil, true
   end
   local ok, err = terrain.load(tr.heightmap, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize))
-  if ok and ter and terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) then
+  if ok and ter and terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize), tr.fine) then
     roads.terrainSwapped()
   end
   -- every block import / move drops all the grass on it; rebuild it before this frame is drawn
@@ -718,6 +718,7 @@ local function commitTerrain(msg)
   local ls = swapped and terrain.lastSwap or nil
   local c = { load = tLoad, coll = tColl - tLoad, cover = sw() - tColl, f = {}, swap = swapped or nil,
     ter = ls and ls.apply or nil,   -- the .ter load alone (ms)
+    fine = ls and ls.fine or nil,   -- (of it: the fine ground's pieces made, terrain.lua)
     mats = ls and ls.mats or nil, fresh = ls and ls.fresh or nil, at = { msg.cx, msg.cy } }
   table.insert(st.commits, c)
   if #st.commits > COMMIT_LOG then table.remove(st.commits, 1) end
@@ -1042,6 +1043,7 @@ local function onMessage(msg)
       return
     end
     p.ready, p.msg = true, msg -- committed by the distance rule in updateWorld()
+    terrain.finePrepare(msg)      -- (its fine ground's pieces made ahead, a few a frame: terrain.fineStep)
     if p.sentAt then st.terrainLatency = st.clock - p.sentAt end
     st.terrainErrorAt = nil
   elseif t == 'terrain_refresh' then
@@ -1534,6 +1536,7 @@ local function updateWorld(dt)
       held and 'held' or 'resumed', pl.z - (gz or pl.z)))
   end
   if held then return end
+  terrain.fineStep()
   local b = st.block
   -- commit gating: the far tiles of the strip the move uncovers must be live, and no coarse tile
   -- may straddle the new block (design 2.3, farfield.uncoverReady)
