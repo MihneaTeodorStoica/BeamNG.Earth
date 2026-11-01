@@ -2018,12 +2018,10 @@ class _Planner:
         return (fid, tuple(np.asarray(xy)[0]), tuple(np.asarray(xy)[-1]))
 
     def _tunnel_approaches(self, plans, secs):
-        """Put source-connected surface approach plans on the solved floor, not blended above it."""
+        """Put only source-owned ground plans on their solved path, including its covered road reach."""
         with self.lock:
             owners = dict(self.__dict__.get("_tunnel_owners", {}))
         for fid, _spec, xy, z, kind in secs:
-            if kind:
-                continue
             a, ab = xy[:-1], np.diff(xy, axis=0)
             l2 = np.maximum((ab * ab).sum(1), 1e-12)
             for source, plan in plans:
