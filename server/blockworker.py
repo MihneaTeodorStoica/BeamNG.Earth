@@ -736,7 +736,7 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
     mark("airports")
     x0, y0, _, _ = box
     if items is not None:               # front doors and shopfronts, driveways into the road mesh
-        props[:] = furniture.off_buildings(props, items, x0, y0)     # (no street tree in a house)
+        props[:] = furniture.off_buildings(props, buildingsmod.near_rings(frame, tx, ty, _s.md, skip=skip))     # (no street tree in a house)
         drives = []
         props.extend(buildingsmod.doors(items, lines, x0, y0, drives))
         props.extend(buildingsmod.toll_booth_rows(items, x0, y0))

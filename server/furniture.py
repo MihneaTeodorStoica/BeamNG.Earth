@@ -583,20 +583,21 @@ def under_decks(rows, decks, wires=None):
     return out
 
 
-def off_buildings(rows, items, x0, y0, groups=(G_STREET_TREE,), clear=STREET_TREE_WALL_M):
+def off_buildings(rows, rings, groups=(G_STREET_TREE,), clear=STREET_TREE_WALL_M):
     """rows (place's) without the ones of groups whose spot is in a building's footprint or within clear m of its
-    wall. items: buildings.road_tile_items' (rings tile-local, from x0, y0)."""
-    if not rows or not items:
+    wall. rings: footprints (k, 2) in the rows' frame (buildings.near_rings: every building near the tile, its own
+    and its neighbours': a tree by the tile's edge in a house the next tile owns)."""
+    if not rows or not rings:
         return rows
     import fast
     fast.require(0, "polyline_dist")
     pick = [i for i, r in enumerate(rows) if r[0] in groups]
     if not pick:
         return rows
-    pts = np.array([rows[i][1:3] for i in pick], np.float64) - [x0, y0]
+    pts = np.array([rows[i][1:3] for i in pick], np.float64)
     bad = np.zeros(len(pick), bool)
-    for s, _, _ in items:
-        ring = np.asarray(s.ring, np.float64)[:, :2]
+    for ring in rings:
+        ring = np.asarray(ring, np.float64)[:, :2]
         if len(ring) < 3:
             continue
         lo, hi = ring.min(0) - clear, ring.max(0) + clear

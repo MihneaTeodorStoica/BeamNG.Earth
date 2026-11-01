@@ -1631,7 +1631,9 @@ class Server:
             chunks += self.airports.tile_chunks(anchor.frame, tx, ty, elev, roadsmod.tile_bbox)
         x0, y0, _, _ = roadsmod.tile_bbox(tx, ty)
         if items is not None:           # front doors and shopfronts, driveways into the road mesh
-            props[:] = furnituremod.off_buildings(props, items, x0, y0)     # (no street tree in a house)
+            # (no street tree in a house: its own or the next tile's)
+            rings = buildingsmod.near_rings(anchor.frame, tx, ty, self.mapdata, skip=skip)
+            props[:] = furnituremod.off_buildings(props, rings)
             drives = []
             props.extend(buildingsmod.doors(items, lines, x0, y0, drives))
             props.extend(buildingsmod.toll_booth_rows(items, x0, y0))

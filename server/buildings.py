@@ -2995,6 +2995,33 @@ def road_tile_items(frame, tx, ty, md, ground, decks=None, skip=frozenset()):
                                  + tuple(d[2:3]) for d in decks] if decks else None, skip=skip)
 
 
+def near_rings(frame, tx, ty, md, margin=2.0, skip=frozenset()):
+    """The outer rings (k, 2) in the anchor frame of every building of the map within margin m of road tile (tx, ty):
+    its own and its neighbours' (road_tile_items has only the ones whose centre is in it). skip: ids left out."""
+    import roads
+    x0, y0, x1, y1 = roads.tile_bbox(tx, ty)
+    out = []
+    seen = set()
+    for k in roads.cells_of_tile(frame, tx, ty, margin=margin):
+        f = md.cell(k, layers=("buildings",), kind="demand").layers.get("buildings")
+        if f is None or not len(f):
+            continue
+        bx = f.boxes(frame)
+        for i in range(len(f)):
+            fid = str(f.ids[i])
+            if fid in seen or fid in skip:
+                continue
+            b = bx[i]
+            if b[2] < x0 - margin or b[0] > x1 + margin or b[3] < y0 - margin or b[1] > y1 + margin:
+                continue
+            seen.add(fid)
+            for part in f.parts(i):
+                if len(part) and len(part[0]) >= 3:
+                    e, n = mapgeom.enu_xy(f, frame, part[0])
+                    out.append(np.c_[e, n])
+    return out
+
+
 TOWN_COVERAGE = 0.16        # a tile whose footprints cover less than this share is a town / suburb (heights)
 # Small towns of the arid West (Bishop, Moab: one-storey main streets with false fronts, ranch houses), told
 # from cities by the footprint share of the district around a tile (1 km: Bishop 0.14, Moab 0.11; Frederick
