@@ -1261,7 +1261,8 @@ class Server:
                 if anchor.bridges is None:
                     anchor.bridges = self.chain_view(anchor, "bridges", elev)
             for fid, _spec, xy, z, _lon in anchor.bridges.parts(feats, (x - w, y - w, x + w, y + w)):
-                decks.setdefault(fid, []).append((np.asarray(xy, np.float64)[:, :2], np.asarray(z, np.float64)))
+                decks.setdefault(fid, []).append((np.asarray(xy, np.float64)[:, :2], np.asarray(z, np.float64),
+                                                  anchor.bridges.depth_of(fid)))
         except Exception as e:          # no decks: the graph follows the ground under bridges
             log.debug("navgraph decks: %s: %s", type(e).__name__, e)
         floors = roadsmod.tunnel_nav_floors(self.tunnels_of(anchor, elev, g), feats,

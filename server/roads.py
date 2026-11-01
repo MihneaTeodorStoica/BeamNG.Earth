@@ -7879,6 +7879,14 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
     return out
 
 
+def _deck_clearance(ch):
+    """A generated deck chunk's (points, half-width per segment, slab-plus-girder depth) for RoadClearance."""
+    half = np.asarray(ch.get("ws", ch["w"]), np.float64) / 2
+    if half.ndim:
+        half = np.maximum(half[:-1], half[1:])
+    return np.asarray(ch["n"], np.float64), half, float(ch.get("dd") or DECK_FULL_DEPTH)
+
+
 def _on_box(p, box, eps=1e-6):
     x0, y0, x1, y1 = box
     return abs(p[0] - x0) < eps or abs(p[0] - x1) < eps or abs(p[1] - y0) < eps or abs(p[1] - y1) < eps
@@ -8093,10 +8101,7 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
                              context_m=context_m if traffic_context else None):
         if ch.get("deck"):
             decks_near.append(ch)
-            half = np.asarray(ch.get("ws", ch["w"]), np.float64) / 2
-            if half.ndim:
-                half = np.maximum(half[:-1], half[1:])
-            traffic_decks.append((np.asarray(ch["n"], np.float64), half))
+            traffic_decks.append(_deck_clearance(ch))
         if not ch.get("ctx"):
             chunks.append(ch)
         elif deck_context is not None:          # the decks around the tile (roadmesh.deck's parapet test)
@@ -8238,7 +8243,7 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
             if tp:
                 tla, tlo, _ = frame.enu_to_geodetic(pts[:, 0], pts[:, 1], 0.0)
                 ws = taper_widths(spec.width, tp, tlo, tla)
-        half = spec.width / 2 if ws is None else np.maximum(ws[:-1], ws[1:]) / 2
+        half = spec.width / 2 if ws is None else (ws[:-1] + ws[1:]) / 4  # surface paints each segment at its mean
         traffic_lines.append((half, pts))
         sh = None                               # (its lines shifted at a merge / split: lane_shifts)
         if fid in seen and fid not in jinternal:
@@ -8340,7 +8345,8 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
     if props is not None and walks is not None:     # street lights and utility poles (furniture.py)
         # (the speed-limit signs are the sign tiles' since 2026-10-28: speedsigns.py)
         props.extend(furniture.place(roads, walks, own_box, wires=wires, town=bool(town), left_hand=left_hand,
-                                     decks=traffic_decks, clearance=clearance, signals=signals, buried=buried,
+                                     decks=[(p, h) for p, h, _depth in traffic_decks], clearance=clearance,
+                                     signals=signals, buried=buried,
                                      region=lamp_region, ground=ground,
                                      lighting={fid: str(f.attrs["osm_lit"][i]).strip().lower()
                                                for fid, (f, i, _sp) in seen.items() if "osm_lit" in f.attrs}))

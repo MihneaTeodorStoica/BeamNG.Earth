@@ -150,10 +150,11 @@ def _lanes(width, oneway, known=None):
 
 
 def _deck_z(decks, fid, x, y):
-    """The deck height at (x, y) of feature fid's bridge parts (decks: fid -> [(xy (k, 2), z (k,))]), or None
-    when the point is not on one (more than 1.5 m off its line)."""
+    """The height at (x, y) of feature fid's bridge parts (decks: fid -> [(xy, z, depth)]), or None when the
+    point is not on one (more than 1.5 m off its line). Existing (xy, z) parts are accepted when depth is unknown."""
     best = None
-    for xy, z in decks.get(fid, ()):
+    for part in decks.get(fid, ()):
+        xy, z = part[:2]
         a, b = xy[:-1], xy[1:]
         d = b - a
         L2 = np.maximum((d * d).sum(1), 1e-12)
@@ -171,9 +172,9 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
     """{"nodes": {name: [x, y, z, radius]}, "edges": [[in, out, oneway, lanes_out, lanes_in, speed m/s,
     drivability, radius]]} of the drivable roads in the square of half size `window` around centre (x, y) of
     the anchor frame. feats_list: the "roads" mapgeom.Features of the cells around (duplicates across cells
-    are taken once). elev(lat, lon) -> metres. decks: fid -> [(xy, z)] of the bridge parts (roads.BridgeProfiles):
-    nodes on a bridge take its deck height (else traffic would spawn on the ground under it), and roads that are
-    bridge all along are in the graph (road_specs leaves them to the bridge builder). widths: the road tiles'
+    are taken once). elev(lat, lon) -> metres. decks: fid -> [(xy, z, structural depth)] of the bridge parts
+    (roads.BridgeProfiles; existing (xy, z) entries leave the depth unknown). Nodes on a bridge take its deck height
+    (else traffic would spawn on the ground under it), and roads that are bridge all along are in the graph. widths:
     measured street widths (roadwidth.py), so the AI's lanes are on the carriageway the road mesh draws. signals:
     the mapped traffic signals (furniture.mapped_signals; None: guessed), as the road tiles' props have them."""
     # tunnel_floors has the same fid -> [(xy, z)] layout as decks, but its road is below
@@ -181,7 +182,7 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
     cx, cy = centre
     nodes, edges, edge_fids, seen = {}, [], [], set()
     carriage, carriage_ll = [], []     # sampled ground carriageways, with heights batched below
-    signal_parts, signal_walks = [], {}
+    signal_parts, signal_walks, signal_depths = [], {}, {}
     copies = roads.copies_of(feats_list)
     prop_arms = {}          # connector name -> [(fid, spec, unit vector away, point, end, length)] (the props' view)
     ring_cands = []         # the roads the road tiles draw (fid, spec, pts, None): roundabout rings (islands.ring_fids)
@@ -234,11 +235,14 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                         continue
                     ge, gn, _ = frame.geodetic_to_enu(ring_ll[:, 1], ring_ll[:, 0], 0.0)
                     ws = roads.taper_widths(rspecs[i].width, tp, ring_ll[:, 0], ring_ll[:, 1])
-                    half = rspecs[i].width / 2 if ws is None else np.maximum(ws[:-1], ws[1:]) / 2
+                    half = rspecs[i].width / 2 if ws is None else (ws[:-1] + ws[1:]) / 4
                     carriage.append((half, np.column_stack([ge, gn])))
                     carriage_ll.append(ring_ll)
             if bspecs[i] is not None and decks and fid in decks:
-                for dxy, dz in decks[fid]:
+                for part in decks[fid]:
+                    dxy, dz = part[:2]
+                    depth = float(part[2]) if len(part) > 2 else roads.DECK_FULL_DEPTH
+                    signal_depths[fid] = max(signal_depths.get(fid, 0.0), depth)
                     signal_parts.append((fid, bspecs[i], np.column_stack([dxy, dz]), float(np.mean(ll[:, 0]))))
                 walk = roads.deck_walks(feats, i, rspecs, left_hand)
                 if walk:
@@ -369,14 +373,12 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
     if signal_parts:
         chunks = roads._deck_chunks(
             signal_parts, (cx - window - 200, cy - window - 200, cx + window + 200, cy + window + 200),
-            walks=signal_walks, shift_of=roads.deck_shift_fn(frame, feats_list, urban_fn, widths, left_hand),
+            depths=signal_depths, walks=signal_walks,
+            shift_of=roads.deck_shift_fn(frame, feats_list, urban_fn, widths, left_hand),
             width_of=roads.deck_width_fn(frame, feats_list))
         for ch in chunks:
             if ch.get("deck"):
-                half = np.asarray(ch.get("ws", ch["w"]), np.float64) / 2
-                if half.ndim:
-                    half = np.maximum(half[:-1], half[1:])
-                signal_decks.append((np.asarray(ch["n"], np.float64), half))
+                signal_decks.append(roads._deck_clearance(ch))
 
     def signal_ground(x, y):
         la, lo, _ = frame.enu_to_geodetic(np.asarray([x]), np.asarray([y]), 0.0)
