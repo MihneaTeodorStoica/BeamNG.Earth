@@ -430,6 +430,10 @@ STREET_TREE_CLASSES = {"residential", "tertiary", "secondary", "living_street"}
 STREET_TREE_SHARE = 0.5         # streets with a row of trees (hashed per street)
 STREET_TREE_SPACING = 11.0
 STREET_TREE_CURB_M = 0.9
+# no street tree with its trunk in a building's footprint or this near its wall: the map's sidewalk runs a metre or two
+# into a rowhouse row where its street's line is off (Baltimore's Canton, 2026-10-31: a tree's crown through the roofs,
+# "floating trees" from the street; .claude/devtools/floattrees.py counts them)
+STREET_TREE_WALL_M = 1.0
 G_POLELAMP = "polelamp"     # a cobra-head arm on a utility pole (East Coast USA's electrical_pole_lamp)
 # The share of a country's low-voltage lines that are underground (the user, 2026-10-26: "Currently we've been placing
 # them almost everywhere"): the European Commission's "Overview of the Potential for Undergrounding the Electricity
@@ -577,6 +581,36 @@ def under_decks(rows, decks, wires=None):
                 keep.append(w)
         wires[:] = keep
     return out
+
+
+def off_buildings(rows, items, x0, y0, groups=(G_STREET_TREE,), clear=STREET_TREE_WALL_M):
+    """rows (place's) without the ones of groups whose spot is in a building's footprint or within clear m of its
+    wall. items: buildings.road_tile_items' (rings tile-local, from x0, y0)."""
+    if not rows or not items:
+        return rows
+    import fast
+    fast.require(0, "polyline_dist")
+    pick = [i for i, r in enumerate(rows) if r[0] in groups]
+    if not pick:
+        return rows
+    pts = np.array([rows[i][1:3] for i in pick], np.float64) - [x0, y0]
+    bad = np.zeros(len(pick), bool)
+    for s, _, _ in items:
+        ring = np.asarray(s.ring, np.float64)[:, :2]
+        if len(ring) < 3:
+            continue
+        lo, hi = ring.min(0) - clear, ring.max(0) + clear
+        m = ~bad & (pts[:, 0] >= lo[0]) & (pts[:, 0] <= hi[0]) & (pts[:, 1] >= lo[1]) & (pts[:, 1] <= hi[1])
+        if not m.any():
+            continue
+        q = np.ascontiguousarray(pts[m])
+        closed = np.ascontiguousarray(np.vstack([ring, ring[:1]]))
+        hit = np.asarray(fast._ef.points_inside(closed, q)) | (np.asarray(fast._ef.polyline_dist(closed, q)) < clear)
+        bad[np.flatnonzero(m)[hit]] = True
+    if not bad.any():
+        return rows
+    drop = {pick[j] for j in np.flatnonzero(bad)}
+    return [r for i, r in enumerate(rows) if i not in drop]
 
 
 def place(roads, walks, box, curb_h=0.15, wires=None, town=False, left_hand=False, decks=(),

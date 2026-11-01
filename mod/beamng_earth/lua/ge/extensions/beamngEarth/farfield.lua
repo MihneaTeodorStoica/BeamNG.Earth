@@ -131,6 +131,7 @@ M.GLOBAL_AID = 0        -- the anchor id of a global tile's instance (it belongs
 
 local pending = {}      -- key -> instance received but not shown yet (current anchor)
 local live = {}         -- key -> shown instance (current anchor), covered or not
+function M.debugLive() return live end      -- (tests: .claude/devtools/floattrees.py, the ground under the trees)
 local old = {}          -- 'anchorId/key' -> shown instance of a previous anchor
 local oldCount = 0
 local mainQ, mH, mT = {}, 1, 0 -- instances to import, FIFO (server order)

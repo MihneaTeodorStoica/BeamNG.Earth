@@ -355,6 +355,9 @@ function M.setGroupEnabled(groups, on)
 end
 
 -- Pure: the n-th pool Forest's name.
+-- (tests: .claude/devtools/floattrees.py reads the tiles' made items and their Forests' transforms)
+function M.debugTiles() return tiles end
+
 function M.forestName(n)
   return M.FOREST_NAME .. '_' .. tostring(n)
 end

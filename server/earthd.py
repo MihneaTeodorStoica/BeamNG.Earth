@@ -1631,6 +1631,7 @@ class Server:
             chunks += self.airports.tile_chunks(anchor.frame, tx, ty, elev, roadsmod.tile_bbox)
         x0, y0, _, _ = roadsmod.tile_bbox(tx, ty)
         if items is not None:           # front doors and shopfronts, driveways into the road mesh
+            props[:] = furnituremod.off_buildings(props, items, x0, y0)     # (no street tree in a house)
             drives = []
             props.extend(buildingsmod.doors(items, lines, x0, y0, drives))
             props.extend(buildingsmod.toll_booth_rows(items, x0, y0))
@@ -2321,7 +2322,9 @@ class Server:
             # QUICK_SYNC_MAX_V: after it (on its own thread): made before it, the prefetch fell behind at 500 mph (the car
             # held 40 s of 90 against none); at 170 mph no hold, roads 1.2 km ahead.
             if getattr(self, "speed", 0.0) < QUICK_SYNC_MAX_V:
-                info["base"] = self.write_quick_base(anchor, cx, cy)
+                # (in the block's own process when it can: just done with its heights; here it took 2-6 s, 2026-10-31)
+                info["base"] = (self._quick_elsewhere(anchor, cx, cy, lane) if lane is not None else None) \
+                    or self.write_quick_base(anchor, cx, cy)
             else:
                 self.quick_pool.submit(self._quick_later, anchor, cx, cy)
         info["seconds"] = time.perf_counter() - t0
@@ -2342,7 +2345,7 @@ class Server:
         info = self.hm.get(key)
         if info is not None and info.get("base"):
             return                              # (its own photo came while this waited its turn)
-        name = self.write_quick_base(anchor, cx, cy)
+        name = self._quick_elsewhere(anchor, cx, cy, LANE_PREFETCH) or self.write_quick_base(anchor, cx, cy)
         conns = [c for c in list(self.connections) if getattr(c, "loop", None) is not None]
         if not name or not conns:
             return
@@ -2499,7 +2502,12 @@ class Server:
                 f.write(terraincache.stored_png(rgb))
             staging.replace(tmp, path)
             tq.append(("png", time.perf_counter()))
-            terraincache.base_entry(self.user_dir, f"{self.vfs_dir}/{name}", base_ao_vfs(self.base_px), rgb, BASE_AO)
+            args = (self.user_dir, f"{self.vfs_dir}/{name}", base_ao_vfs(self.base_px), rgb, BASE_AO)
+            pool = self.block_pools[LANE_PREFETCH][0] if (URGENT_ELSEWHERE and self.block_pools) else None
+            if pool is not None:        # (the BC7 encode on a block process's core: ~1 s here beside the rest)
+                pool.submit(blockworker.base_entry, *args).result()
+            else:
+                terraincache.base_entry(*args)
             tq.append(("cache", time.perf_counter()))
             if tq[-1][1] - tq[0][1] > 1.0:
                 log.info("quick base photo %s in %.2f s: %s (%d px)", key, tq[-1][1] - tq[0][1],

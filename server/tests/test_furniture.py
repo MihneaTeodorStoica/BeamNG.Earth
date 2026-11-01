@@ -331,3 +331,18 @@ class SignClearance(unittest.TestCase):
         big = (40.0, np.array([[-100.0, 0.0], [100.0, 0.0]]))
         self.assertIsNone(furniture._off_carriageways(np.zeros(2), np.array([0.0, 1.0]), np.array([1.0, 0.0]),
                                                       2.0, 4.0, [big]))
+
+
+class StreetTreesOffBuildings(unittest.TestCase):
+    def test_tree_in_a_rowhouse_goes_others_stay(self):
+        """A sidewalk run a metre into a rowhouse row (Canton, Baltimore): its street tree goes, one clear of the
+        walls stays, and a lamp in the same footprint is not this rule's."""
+        from types import SimpleNamespace
+        house = SimpleNamespace(ring=np.array([[10.0, 10.0], [30.0, 10.0], [30.0, 25.0], [10.0, 25.0]]))
+        rows = [[furniture.G_STREET_TREE, 120.0, 211.0, 0.0, 0.0, 1.0, 7.0, 0.5],     # 1 m into the house
+                [furniture.G_STREET_TREE, 120.0, 209.5, 0.0, 0.0, 1.0, 7.0, 0.5],     # 0.5 m from its wall
+                [furniture.G_STREET_TREE, 145.0, 205.0, 0.0, 0.0, 1.0, 7.0, 0.5],     # clear
+                [furniture.G_LAMP, 115.0, 215.0, 0.0, 0.0, 1.0, 9.0, 0.0]]
+        out = furniture.off_buildings(rows, [(house, None, None)], 100.0, 200.0)
+        self.assertEqual([(r[0], r[1], r[2]) for r in out],
+                         [(furniture.G_STREET_TREE, 145.0, 205.0), (furniture.G_LAMP, 115.0, 215.0)])

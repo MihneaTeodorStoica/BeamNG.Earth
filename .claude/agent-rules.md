@@ -85,6 +85,9 @@
     abutments, parapets across a road at its height, deck ends under another deck. Run it after bridge / grading
     changes and on any place the user reports. `RC_NEAR=lat,lon,r` / `RC_FID=prefix` dump the ends / chunks.
   - `deckedges.py LAT LON N`: deck outline steps at joints, fork notches, slab edge jumps.
+  - `floattrees.py [R] [MAX]` (game in play): trees / shrubs / rocks round the camera at their drawn places vs the
+    terrain, the server's ground, the far tiles under them and building footprints; exit 1 over MAX.
+  - `approachlidar.py LAT LON N`: drawn bridge approaches vs the 3DEP lidar's road surface.
   - `bnear.py LAT LON R`: buildings near a point.
   - `deckz.py` / `approachprof.py SERVER LAT LON R`: bridge deck heights vs ground.
   - `xsec.py`, `plandbg.py`, `gradegrid.py SERVER OUT.npy LAT LON HALF`: grading (`PYONLY=1` forces Python).
