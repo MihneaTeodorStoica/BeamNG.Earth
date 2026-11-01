@@ -1123,12 +1123,16 @@ class Server:
         zoom = anchor.zooms[0]
         g = self.grader_for(anchor)
 
+        def raw(la, lo):
+            return self.ground(anchor.frame, la, lo, self.dem.sample(la, lo, zoom))
+
         def elev(la, lo):
-            z = self.ground(anchor.frame, la, lo, self.dem.sample(la, lo, zoom))
+            z = raw(la, lo)
             # graded under the roads as the block is: a rock beside a track cut into a slope floated 1.9 m over the cut
             # (Stelvio pass, the user's report 2026-10-17)
             return g.apply(la, lo, z, gradingmod.ROAD_LIFT) if g is not None else z
-        rows = vegetationmod.tile_items(anchor.frame, tx, ty, self.veg, lambda k: True, elev, self.sea, as_json=True)
+        rows = vegetationmod.tile_items(anchor.frame, tx, ty, self.veg, lambda k: True, elev, self.sea, as_json=True,
+                                        raw=raw if g is not None else None)
         if rows is None:
             return None
         return vegetationmod.write_tile(self.out_dir, self.vfs_dir, aid, tx, ty, rows, flat=flat)
@@ -1150,10 +1154,14 @@ class Server:
         zoom = anchor.zooms[0]
         g = self.grader_for(anchor)
 
+        def raw(la, lo):
+            return self.ground(None, la, lo, self.dem.sample(la, lo, zoom))
+
         def elev(la, lo):
-            z = self.ground(None, la, lo, self.dem.sample(la, lo, zoom))
+            z = raw(la, lo)
             return g.apply(la, lo, z, gradingmod.ROAD_LIFT) if g is not None else z
-        got = vegetationmod.geo_tile_items(gx, gy, self.veg, lambda k: True, elev, self.sea, as_json=True)
+        got = vegetationmod.geo_tile_items(gx, gy, self.veg, lambda k: True, elev, self.sea, as_json=True,
+                                           raw=raw if g is not None else None)
         if got is None:
             return None
         rows, pivot = got

@@ -726,10 +726,30 @@ def _no_items(as_json, lat, lon):
     return out
 
 
-def tile_items(frame, tx, ty, veg, cell_ready, elev, sea=None, as_json=False):
+# no tree or bush where the roads' grading moved the ground this much (a cutting's or an embankment's face: cleared in
+# life; drawn on the terrain's 2 m squares the face is steeper than the exact ground the items stand on, a tree on it
+# 2-10 m over or under the drawn slope: Pittsburgh's Mount Washington, 2026-10-31, .claude/devtools/floattrees.py).
+# Rocks stay (sunk into the ground: _sink_rocks)
+GRADED_CLEAR_M = 1.5
+
+
+def _off_graded(it, e, n, zg, raw):
+    """(it, e, n, zg) without the trees and bushes standing where the graded ground zg is GRADED_CLEAR_M or more off
+    the DEM's (raw(lat, lon); None: all kept)."""
+    if raw is None or not len(it):
+        return it, e, n, zg
+    zr = np.asarray(raw(it.lat, it.lon), np.float64)
+    keep = (np.abs(zg - zr) < GRADED_CLEAR_M) | np.isin(it.group, (G_ROCK, G_DESERT_ROCK))
+    if keep.all():
+        return it, e, n, zg
+    return it.take(keep), e[keep], n[keep], zg[keep]
+
+
+def tile_items(frame, tx, ty, veg, cell_ready, elev, sea=None, as_json=False, raw=None):
     """The items of anchor tile (tx, ty), each [group, x, y, z, yaw, scale, height, rank] in the anchor
     frame, the ground z from elev(lat, lon) (the DEM shaped as the block's ground: runways, carved
-    water). None when a cell under it is not at hand yet (veg cells are built in the background)."""
+    water). None when a cell under it is not at hand yet (veg cells are built in the background). raw(lat, lon): the
+    ground before the roads' grading (_off_graded)."""
     import roads as roadsmod
     x0, y0, x1, y1 = roadsmod.tile_bbox(tx, ty)
     la, lo, _ = frame.enu_to_geodetic(np.array([x0, x1, x0, x1]), np.array([y0, y0, y1, y1]), np.zeros(4))
@@ -759,6 +779,9 @@ def tile_items(frame, tx, ty, veg, cell_ready, elev, sea=None, as_json=False):
         keep = np.sort(np.argpartition(it.rank, TILE_ROWS_MAX - 1)[:TILE_ROWS_MAX])
         it, e, n = it.take(keep), e[keep], n[keep]
     zg = np.asarray(elev(it.lat, it.lon), np.float64)
+    it, e, n, zg = _off_graded(it, e, n, zg, raw)
+    if len(it) == 0:
+        return _no_items(as_json, clat, clon)
     _, _, z = frame.geodetic_to_enu(it.lat, it.lon, zg)
     z = _sink_rocks(frame, it, e, n, np.asarray(z, np.float64), elev)
     if as_json:
@@ -775,12 +798,12 @@ def tile_items(frame, tx, ty, veg, cell_ready, elev, sea=None, as_json=False):
             for g, a, b, c, yw, sc, h, r in zip(it.group, e, n, np.asarray(z), it.yaw, it.scale, it.height, it.rank)]
 
 
-def geo_tile_items(gx, gy, veg, cell_ready, elev, sea=None, as_json=False):
+def geo_tile_items(gx, gy, veg, cell_ready, elev, sea=None, as_json=False, raw=None):
     """The items of geotile (gx, gy) (geotiles.Z: the global grid, no anchor) in the tile's own frame (geotiles.frame:
     x, y of each at h = 0, z at its ground), as tile_items' rows, and the tile's pivot (the median of the items'
     z, m in that frame: the mod places the tile there, geotile.lua). Each item is in the one tile its lat / lon falls
     in (the grid partitions the Earth: no item twice, none lost, whatever the anchor). (rows, pivot), or None when
-    its map cell is not at hand yet."""
+    its map cell is not at hand yet. raw(lat, lon): the ground before the roads' grading (_off_graded)."""
     import geotiles
     frame = geotiles.frame(gx, gy)
     key = mapcells.CellKey(*geotiles.tile_cell(gx, gy))
@@ -806,6 +829,9 @@ def geo_tile_items(gx, gy, veg, cell_ready, elev, sea=None, as_json=False):
         keep = np.sort(np.argpartition(it.rank, TILE_ROWS_MAX - 1)[:TILE_ROWS_MAX])
         it, e, n = it.take(keep), e[keep], n[keep]
     zg = np.asarray(elev(it.lat, it.lon), np.float64)
+    it, e, n, zg = _off_graded(it, e, n, zg, raw)
+    if len(it) == 0:
+        return _no_items(as_json, clat, clon), 0.0
     _, _, z = frame.geodetic_to_enu(it.lat, it.lon, zg)
     z = _sink_rocks(frame, it, e, n, np.asarray(z, np.float64), elev)
     pivot = round(float(np.median(z)), 2)
