@@ -103,6 +103,14 @@ M.SCHEMA = {
   cacheCapGb = { kind = 'number', default = 20, min = 0, max = 100000, label = 'Download cache size (GB, 0: unlimited)' },
   -- even frame pacing (framepacer.lua): frames shorter than the recent ones wait, so the game's time runs steadily
   framePacing = { kind = 'bool', default = true, label = 'Even frame pacing' },
+  -- the world server's share of the CPU (server cpupin.player_settings reads them from this file when it starts;
+  -- GitHub #529: an i5-3470 loaded the map in a few seconds instead of 10-20 with 2 of its 4 cores at normal priority)
+  serverCores = { kind = 'enum', default = 'auto', values = { 'auto', '1', '2', '3', '4', '6', '8' },
+    label = 'World server CPU cores' },
+  serverPriority = { kind = 'enum', default = 'low', values = { 'low', 'normal' }, label = 'World server priority' },
+  -- after a teleport the server on every CPU core and the game on two, until the new place is loaded (server
+  -- cpupin.full_split, read at each teleport; the user, 2026-10-31)
+  teleportPriority = { kind = 'bool', default = false, label = 'Full priority loading (joining, teleports)' },
   -- the GPS route's data fetched ahead (the server's route_download; sent with each route): none, the next 12 miles
   -- (20 km), or the whole route (up to 300 miles)
   routeDownload = { kind = 'enum', default = 'ahead', values = { 'off', 'ahead', 'route' },
@@ -120,7 +128,8 @@ M.ORDER = { 'quality', 'framePacing', 'terrainDetail', 'groundPhoto', 'trees', '
   'weatherMode', 'realGravity', 'groundCover', 'groundCoverDensity', 'rocks', 'roads', 'highwaySigns', 'dashboardSatellite',
   'hudVisible', 'statusBar',
   'placeNamesOnline', 'creditsVisible', 'beammpOnLaunch',
-  'creditsCorner', 'creditsSize', 'cacheCapGb', 'routeDownload', 'devOutlineKm', 'devMapKm' }
+  'creditsCorner', 'creditsSize', 'cacheCapGb', 'routeDownload', 'serverCores', 'serverPriority', 'teleportPriority', 'devOutlineKm',
+  'devMapKm' }
 
 -- Stored but not on the settings page
 M.HIDDEN = { welcomeSeen = true, updateDismissed = true, devNoticeSeen = true, qualityDetected = true }
@@ -746,7 +755,8 @@ local function otherPlayers()
   local okB, inMP = pcall(function() return require('beamngEarth/beammp').inSession() end)
   if not okB or not inMP then return nil end
   local ok, list = pcall(function() return require('beamngEarth/mpsession').others() end)
-  return ok and list or nil
+  -- (none: nil, an empty Lua table reaches the map as {} and not [])
+  return ok and type(list) == 'table' and next(list) ~= nil and list or nil
 end
 
 -- The map's weather + local-time badge (the player's spot): sky.lua's real local clock for the lat/lon, and the

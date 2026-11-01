@@ -50,7 +50,8 @@ You can help support development by reporting [issues](https://github.com/TecnaG
 - Roads painted into the ground itself (no floating road surface), with lane markings, sidewalks and curbs, curb ramps, storm drains, cobblestone streets,
   traffic islands, roundabouts, rural motorways with shoulders and toll booths; the ground graded under them, with
   retaining walls where a road is cut into a hill (dry stone in the mountains and towns, concrete along major roads)
-  and stone parapets along mountain roads' drops; metal guard rails, concrete and cable barriers where OpenStreetMap maps them; median
+  and stone parapets along mountain roads' drops; switchback mountain pass roads (the Stelvio) narrow, between their
+  walls and parapets; metal guard rails, concrete and cable barriers where OpenStreetMap maps them; median
   barriers down divided highways (concrete walls, cable barriers or steel rails by the median's width and the
   country's practice, open at crossovers and ramps); street lights, utility poles with wires, traffic signals,
   stop signs, traffic lights and sidewalks where OpenStreetMap maps them;
@@ -95,7 +96,8 @@ You can help support development by reporting [issues](https://github.com/TecnaG
 - Buildings, sidewalks, curbs and bridge decks are solid (lean collision meshes near the car keep the
   physics' collision rebuilds cheap).
 - Real bridge and tunnel heights where open data measures them: in the US, bridge decks follow the USGS 3DEP lidar
-  measured along each bridge; in France (IGN BD TOPO) and Norway (NVDB), bridges and tunnels follow the national road
+  measured along each bridge, and so do the roads leading onto them up to where they are back on the ground
+  (`BNE_APPROACH_LIDAR=off` turns that part off); in France (IGN BD TOPO) and Norway (NVDB), bridges and tunnels follow the national road
   databases' heights, and so do roads where the terrain data is coarse. Elsewhere, or where a source has nothing,
   the heights are estimated as before. The environment variables `BNE_ROADZ=off` (all of it) and
   `BNE_LIDAR_DECKS=off` (the US lidar only) turn it off.
@@ -185,6 +187,12 @@ You can help support development by reporting [issues](https://github.com/TecnaG
 - Uses your graphics card for some of the world server's work (colour matching of the photos, compressing the distant
   textures) when it can, so the server needs less of your CPU; without a usable one the CPU does it as before.
 - Offline play from the download cache (with a size cap and "clear cache").
+- **Performance** settings page: the world server's CPU cores (Auto: a quarter of your cores, at most half) and its
+  priority (Low: the game always comes first; Normal: the map loads faster on a busy CPU), from the next start; and
+  **Full priority loading**: when you join the world and after a teleport, the app builds the place on every CPU core
+  and the game keeps two until it has loaded.
+- Works behind a proxy: the app's downloads use the HTTP/HTTPS proxy set on your computer (HTTPS_PROXY, HTTP_PROXY,
+  NO_PROXY or the system's proxy setting; SOCKS proxies are not supported).
 - Updates: the mod tells you in game (and on its settings page, with a link) when a newer version is on GitHub;
   with the downloaded app (.exe / AppImage), **Update now** downloads it next to your copy, checks it against
   GitHub's checksum, and the next time you start BeamNG.Earth the new version starts (your old file and shortcut
@@ -240,7 +248,8 @@ as a GitHub **pre-release** named after the beta it follows, with a build number
 `1.7.2-beta.dev.37`). They have the newest fixes and features, but they are **built from the development branch
 and not thoroughly tested**: expect bugs, and things may change or break from one build to the next. The beta
 releases are the tested ones. A development build says so in game, and its update check offers the next development
-build (or the next beta, if that is newer); a beta only ever offers betas.
+build (or the next beta, if that is newer); a beta only ever offers betas. Only the newest three development builds
+are kept on the releases page.
 
 **Uninstalling:** delete the `beamng_earth` folder in `<BeamNG user folder>/current/mods/unpacked/` and the
 downloaded file (or this folder); the map cache is `.cache/beamng-earth` in your home folder (`~/.cache/beamng-earth` on Linux,

@@ -172,6 +172,13 @@ jobs:
           } > notes.md
           gh release create "v$v" out/linux/* out/windows/* dist/BeamNG.Earth-BeamMP-Server-*.zip \
             --target "$GITHUB_SHA" --title "BeamNG.Earth $v (development build)" --notes-file notes.md --prerelease
+          # only the newest DEV_KEEP development builds stay (the releases page has no filter: the betas got lost among
+          # them, and the in-game update check reads the newest 30 releases only)
+          DEV_KEEP=3
+          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            | jq -r --argjson keep "$DEV_KEEP" '[.[] | select(.isPrerelease and (.tagName | test("dev\\.[0-9]+$")))]
+                | sort_by(.createdAt) | reverse | .[$keep:][] | .tagName' \
+            | while read -r old; do gh release delete "$old" --yes --cleanup-tag || true; done
       - name: Publish v${{ needs.check.outputs.version }}
         if: needs.check.outputs.dev != 'true'
         env:

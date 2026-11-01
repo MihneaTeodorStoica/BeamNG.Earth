@@ -221,6 +221,21 @@ local function slotDrop(sl)
   if (slotLive[sl[1]] or 0) > 0 then slotDropped[sl[1]] = { sl[2], sl[3] }
   else slotsGone[#slotsGone + 1] = { sl[1], sl[2], sl[3] } end
 end
+-- Is any mesh file a tile's parts (and exact variants) are made from gone? A server restart sends the same content
+-- again (its hash h), whose objects the tile keeps, but the new server deletes the old run's session folder their
+-- files were in: the objects showed nothing after the next reload of their shapes (the Stelvio's summit buildings,
+-- 2026-10-31: three restarts in an evening, every building of the pass gone; their world box 0..2 m at the origin).
+-- Such a tile is made again from the new message.
+local function filesGone(parts, exact)
+  for _, p in pairs(parts or {}) do
+    local sh = type(p) == 'table' and p.shape
+    if type(sh) == 'string' and sh ~= '' and not FS:fileExists(sh) then return true end
+  end
+  for _, sh in pairs(exact or {}) do
+    if type(sh) == 'string' and sh ~= '' and not FS:fileExists(sh) then return true end
+  end
+  return false
+end
 -- The slots of msg.slots[what] as { n, serial, session } (nil: not pooled).
 local function msgSlot(msg, what)
   local e = type(msg.slots) == 'table' and msg.slots[what]
@@ -228,6 +243,19 @@ local function msgSlot(msg, what)
   local n, serial = slotOf(e[1]), tonumber(e[2])
   if not n or not serial then return nil end
   return { n, serial, session, path = e[1] }
+end
+
+-- Pooled shapes of other modules (terrain.lua's fine ground): the slot record of a pooled path and its serial (nil: not
+-- pooled), an object made with it, and the slot let go (with its object id when one was made).
+function M.pooledSlot(path, serial)
+  local n = slotOf(path)
+  if not n or not tonumber(serial) then return nil end
+  return { n, tonumber(serial), session }
+end
+function M.pooledMade(id, path) slotMade(id, path) end
+function M.pooledRelease(sl, id)
+  if sl then slotDrop(sl) end
+  if id then slotObjGone(id) end
 end
 
 -- The [slot, serial] pairs gone since the last call, for server session `sess`.
@@ -667,12 +695,25 @@ function M.onGeoTile(msg, currentAnchor, a)
   local key = geoKey(msg.key)
   local old = tiles[key]
   local h = msg.h or data.h
-  if old and old.geo and h and old.h == h then
+  if old and old.geo and h and old.h == h and not filesGone(old.parts, old.exactShape) then
     -- the same content again (a server restart): its objects stay; the new message's slots are not used
     if type(msg.slots) == 'table' then
       for w in pairs(msg.slots) do slotDrop(msgSlot(msg, w)) end
     end
     old.anchor, old.orphan = currentAnchor, nil
+    -- (its furniture and guard rails again where trees.lua has them no more: a disconnect clears them all, trees.clear;
+    -- the poles near the car were gone after a server restart, their wires, part of the tile, still up: the Stelvio,
+    -- 2026-10-31)
+    local T = require('beamngEarth/trees')
+    if type(data.props) == 'table' and type(data.props.items) == 'table' and not T.hasGeo('p' .. old.gkey) then
+      T.onGeoRows('p' .. old.gkey, old.gkey, data.props.items, data.props.groups, nil, old.frame, old.rowPivot or 0,
+        old.anchorObj)
+    end
+    if type(data.guardrails) == 'table' and type(data.guardrails.items) == 'table' and #data.guardrails.items > 0
+        and not T.hasGeo('g' .. old.gkey) then
+      T.onGeoRows('g' .. old.gkey, old.gkey, data.guardrails.items, data.guardrails.groups, 17, old.frame,
+        old.rowPivot or 0, old.anchorObj)
+    end
     M.geoStats.kept = M.geoStats.kept + 1
     return true
   end
@@ -1217,7 +1258,7 @@ function M.onFarGeo(msg, currentAnchor, kind)
   if k == 'F' then farSeen[key] = true end
   local old = far[key]
   local h = data.h
-  if old and old.geo and h ~= nil and old.h == h then
+  if old and old.geo and h ~= nil and old.h == h and not filesGone(old.parts) then
     release()
     old.orphan, old.anchor = nil, currentAnchor
     M.geoStats.farKept = (M.geoStats.farKept or 0) + 1
@@ -2164,6 +2205,52 @@ function M.signTiles(x, y)
     end
   end
   return n, far
+end
+
+-- The server session folders the road tiles' and the far geotiles' objects are made from (their parts', exact
+-- variants' and far parts' shapes): claimed with the far field's (core.lua hello / pose `sessions`), so a restarted
+-- server keeps an earlier run's folder while a tile it sent again unchanged still shows its files. Only the far
+-- field's were claimed: the kept road tiles' folder went 10 minutes after a server restart, their buildings with it
+-- (the Stelvio's summit, 2026-10-31).
+-- (each path's folder memoised: it runs on every pose, farfield.heldSessions; cleared past HELD_MEMO_MAX paths)
+local HELD_MEMO_MAX = 20000
+local heldMemo, heldMemoN = {}, 0
+function M.heldSessions()
+  local ff = require('beamngEarth/farfield')
+  local set = {}
+  local function add(sh)
+    if type(sh) ~= 'string' then return end
+    local f = heldMemo[sh]
+    if f == nil then
+      f = ff.folderOf(sh) or false
+      if heldMemoN >= HELD_MEMO_MAX then heldMemo, heldMemoN = {}, 0 end
+      heldMemo[sh], heldMemoN = f, heldMemoN + 1
+    end
+    if f then set[f] = true end
+  end
+  for _, t in pairs(tiles) do
+    for _, p in pairs(t.parts or {}) do if type(p) == 'table' then add(p.shape) end end
+    for _, sh in pairs(t.exactShape or {}) do add(sh) end
+  end
+  for _, f in pairs(far) do
+    if f.shape then add(f.shape) end
+    for _, p in pairs(f.parts or {}) do if type(p) == 'table' then add(p.shape) end end
+  end
+  local out = {}
+  for f in pairs(set) do out[#out + 1] = f end
+  table.sort(out)
+  return out
+end
+
+-- Every server session folder the scene's objects still use (core.lua hello / pose `sessions`): the far field's and
+-- the road tiles' (heldSessions)
+function M.allHeldSessions()
+  local out, seen = {}, {}
+  for _, list in ipairs({ require('beamngEarth/farfield').heldSessions(), M.heldSessions() }) do
+    for _, f in ipairs(list) do if not seen[f] then seen[f] = true; out[#out + 1] = f end end
+  end
+  table.sort(out)
+  return out
 end
 
 function M.status()

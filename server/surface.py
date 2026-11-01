@@ -295,10 +295,14 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
     def add(dst, c, r, half):
         if len(c) >= 2:
             dst[0].append(np.stack([c[:-1], r[:-1], c[1:], r[1:]], axis=1))
-            dst[1].append(np.full(len(c) - 1, half / square))
+            half = np.asarray(half, np.float64)         # (per point where the road tapers: each segment's mean)
+            dst[1].append(np.full(len(c) - 1, half / square) if half.ndim == 0 else (half[:-1] + half[1:]) / 2 / square)
 
-    def line(x, y, spec, aisle):
+    def line(x, y, spec, aisle, tapers=()):
         width, kind = spec.width, roadsmod.surface_material_kind(spec)
+        ws = roadsmod.taper_widths(spec.width, tapers, x, y)     # (its width along it where it tapers: road_tapers)
+        if ws is not None:
+            width = ws
         if aisle:
             width += 2 * AISLE_STALLS_M         # the stalls either side (parking.aisle_spots): no grass under cars
         walks = roadsmod.has_sidewalks(spec)
@@ -308,13 +312,17 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
                                                 # 2026-10-15)
         c, r = to_px(x, y)
         c, r = np.asarray(c, np.float64), np.asarray(r, np.float64)
-        reach = (width / 2 + ROAD_EDGE_M + (0 if walks else VERGE_M)) / square + 2
+        reach = (float(np.max(width)) / 2 + ROAD_EDGE_M + (0 if walks else VERGE_M)) / square + 2
         if c.max() < -reach or c.min() > w + reach or r.max() < -reach or r.min() > h + reach:
             return
         add(segs[kind], c, r, width / 2 + ROAD_EDGE_M)
         if not walks:
             add(verge, c, r, width / 2 + ROAD_EDGE_M + VERGE_M)    # (VERGE_M past the road's material)
 
+    copies = roadsmod.copies_of(feats_list)     # (each joint's taper from its own cell: roads.joint_desc)
+
+    def taper_of(f):
+        return roadsmod.road_tapers(f, urban_fn, widths)
     for feats in feats_list:
         if feats is None or len(feats) == 0:
             continue
@@ -338,7 +346,8 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
             mw = roadsmod.median_width(specs[i])
             ms = roadsmod.median_side(specs[i])
             for ring in roadsmod.ground_parts(feats, i):      # not bridges / tunnels
-                line(ring[:, 0], ring[:, 1], specs[i], aisle)
+                line(ring[:, 0], ring[:, 1], specs[i], aisle,
+                     roadsmod.joint_desc(copies.get(fid, [(feats, i)]), taper_of))
                 if ms is not None and mw > roadsmod.MEDIAN_SLAB_M and len(ring) >= 2:
                     # the median's ground: lawn (report #48, Boston Street, 2026-10-17)
                     sc = np.array([111320.0 * math.cos(math.radians(float(ring[0, 1]))), 110540.0])
@@ -445,6 +454,10 @@ def _road_segments(frame, x0, y0, size, w, h, feats_list, urban_fn=None, widths=
     segs, hws, kind = [], [], []
     nroad = 0
     seen = set()
+    copies = roadsmod.copies_of(feats_list)     # (each joint's taper from its own cell: roads.joint_desc)
+
+    def taper_of(f):
+        return roadsmod.road_tapers(f, urban_fn, widths)
     for feats in feats_list:
         if feats is None or len(feats) == 0:
             continue
@@ -468,7 +481,13 @@ def _road_segments(frame, x0, y0, size, w, h, feats_list, urban_fn=None, widths=
                 if len(c) < 2 or c.max() < -hw or c.min() > w + hw or r.max() < -hw or r.min() > h + hw:
                     continue
                 segs.append(np.stack([c[:-1], r[:-1], c[1:], r[1:]], axis=1))
-                hws.append(np.full(len(c) - 1, hw))
+                ws = roadsmod.taper_widths(sp.width, roadsmod.joint_desc(copies.get(fid, [(feats, i)]), taper_of),
+                                           ring[:, 0], ring[:, 1])   # (tapered: road_tapers, each joint's own cell)
+                if ws is None:
+                    hws.append(np.full(len(c) - 1, hw))
+                else:
+                    hp = (ws / 2 + PHOTO_ROAD_EDGE_M) * px_m
+                    hws.append((hp[:-1] + hp[1:]) / 2)
                 kind.append(np.full(len(c) - 1, kinds.index(sp.kind), np.uint8))
                 if roads_of is not None:
                     roads_of.append((np.full(len(c) - 1, nroad, np.int64),
@@ -721,17 +740,21 @@ def _fill_island_photos(rgb, polys):
     return np.asarray(im)
 
 
-def photo_roads(rgb, frame, x0, y0, size, feats_list, urban_fn=None, widths=None):
+def photo_roads(rgb, frame, x0, y0, size, feats_list, urban_fn=None, widths=None, simple=False):
     """The photo rgb (H x W x 3, row 0 = north, covering [x0, x0 + size] x [y0, y0 + size] of frame) with the
     carriageways of feats_list (road Features: roads.road_specs widths, ground parts only) painted in, antialiased
     (earthfast.paint_lines, PHOTO_ROAD_RGBA). Roundabout footprints are filled with grass first so the photo's old
-    through-road scar does not show; carriageways paint over the ring. Pure (a new array)."""
+    through-road scar does not show; carriageways paint over the ring. simple: the carriageways alone (a stand-in
+    photo, shown a second or two at speed: the junctions' corners were 1.3 s of its 2 s). Pure (a new array)."""
     fast.require(49, "roads in the ground")
     h, w = rgb.shape[:2]
-    # the rounded corners of curbless junctions (roadcorners.py) in the asphalt's colour, under the roads
-    rgb = photo_corners(rgb, frame, x0, y0, size, corner_pads(frame, x0, y0, size, feats_list, urban_fn, widths))
-    filled = _fill_island_photos(np.ascontiguousarray(rgb, np.uint8),
-                                 _island_pixel_polys(frame, x0, y0, size, w, h, feats_list, urban_fn, widths))
+    if simple:
+        filled = np.ascontiguousarray(rgb, np.uint8)
+    else:
+        # the rounded corners of curbless junctions (roadcorners.py) in the asphalt's colour, under the roads
+        rgb = photo_corners(rgb, frame, x0, y0, size, corner_pads(frame, x0, y0, size, feats_list, urban_fn, widths))
+        filled = _fill_island_photos(np.ascontiguousarray(rgb, np.uint8),
+                                     _island_pixel_polys(frame, x0, y0, size, w, h, feats_list, urban_fn, widths))
     got = _road_segments(frame, x0, y0, size, w, h, feats_list, urban_fn, widths)
     if got is None:
         return filled
@@ -782,18 +805,19 @@ def _square_lots(frame, x0, y0, size, surface):
     return surface.lots(la, lo)
 
 
-def paint_square(rgb, frame, x0, y0, size, surface, widths=None):
+def paint_square(rgb, frame, x0, y0, size, surface, widths=None, simple=False):
     """photo_roads for a ground photo over [x0, x0 + size]² of frame with the roads of surface's cached cells (a
     Surface; never waits); as it was when its texels are coarser than PHOTO_ROADS_MAX_TEXEL or no cell is cached.
     Parking lots are painted first (photo_lots), then gas-station pads, then the carriageways over both."""
     if surface is None or size / max(rgb.shape[1], 1) > PHOTO_ROADS_MAX_TEXEL:
         return rgb
-    rgb = photo_lots(rgb, frame, x0, y0, size, _square_lots(frame, x0, y0, size, surface))
-    rgb = photo_pads(rgb, frame, x0, y0, size, _square_pads(frame, x0, y0, size, surface))     # (under the roads)
+    if not simple:          # (simple, a stand-in's: the carriageways alone, photo_roads)
+        rgb = photo_lots(rgb, frame, x0, y0, size, _square_lots(frame, x0, y0, size, surface))
+        rgb = photo_pads(rgb, frame, x0, y0, size, _square_pads(frame, x0, y0, size, surface))     # (under the roads)
     feats = _square_roads(frame, x0, y0, size, surface)
     if not feats:
         return rgb
-    return photo_roads(rgb, frame, x0, y0, size, feats, surface.urban, widths)
+    return photo_roads(rgb, frame, x0, y0, size, feats, surface.urban, widths, simple=simple)
 
 
 def unghost_square(rgb, frame, x0, y0, size, surface, widths=None):

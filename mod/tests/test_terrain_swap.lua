@@ -110,4 +110,37 @@ T.check(terrain.swap('/t/g.ter', 2, 512, 256, 0, 0, { materials = otherMats }, '
   and calls.updateMaterial == before + #otherMats, 'one updateMaterial per slot after the swap: '
   .. tostring((calls.updateMaterial or 0) - before))
 terrain.REBIND_AFTER_SWAP = false
+-- Fine ground (server finepatch.py, 2026-11-01): a block's pieces made ahead (finePrepare / fineStep: hidden, not
+-- colliding), switched on by its swap (no new object), and their pooled slots let go with them
+local roads = require('beamngEarth/roads')
+roads.setSession('s1')
+local fine = { bank = 1, materials = { { 'bngEarthFine1_4', 'bngEarthGroundRock' } },
+  parts = { { shape = '/temp/beamngEarth/s1/slot_00007.cdae', pos = { 0, 0, 0 }, slot = 3 },
+            { shape = '/temp/beamngEarth/s1/b_fine_1_0r.cdae', pos = { 64, 0, 0 }, collide = false } } }
+local made0 = calls.createObject_TSStatic or 0
+terrain.finePrepare({ ter = '/t/f1.ter', fine = fine, base = '/t/f1_base.png' })
+terrain.fineStep()
+local st0 = terrain.fineStatus()
+T.check(st0.staged == 2 and (calls.createObject_TSStatic or 0) == made0 + 2, 'both pieces made ahead')
+local staged = {}
+for _, o in pairs(S.objects) do if o.class == 'TSStatic' and o.fields.shapeName and o.fields.shapeName:find('/s1/') then staged[#staged + 1] = o end end
+T.check(#staged == 2 and staged[1].hidden and staged[1].fields.collisionType == 'None', 'made ahead: hidden, not colliding')
+T.check(scenetree.findObject('bngEarthFine1_4') ~= nil, 'its material made with the block photo')
+T.check(terrain.swap('/t/f1.ter', 2, 512, 256, 0, 0, { materials = otherMats }, '/t/f1_base.png', 512, fine), 'swapped')
+T.check((calls.createObject_TSStatic or 0) == made0 + 2, 'the swap makes no piece again')
+local cols = {}
+for _, o in ipairs(staged) do cols[o.fields.shapeName] = o.fields.collisionType; T.check(not o.hidden, 'shown') end
+T.check(cols['/temp/beamngEarth/s1/slot_00007.cdae'] == 'Visible Mesh Final'
+  and cols['/temp/beamngEarth/s1/b_fine_1_0r.cdae'] == 'None', 'colliding but for the rim piece')
+T.check(terrain.fineStatus().pieces == 2 and terrain.fineStatus().bank == 1, 'the block\'s pieces')
+-- the next block without fine ground: the pieces go, the pooled one's slot is reported gone
+T.check(terrain.swap('/t/f2.ter', 2, 512, 256, 0, 0, { materials = otherMats }, '/t/f2_base.png', 512), 'swapped again')
+local gone = roads.takeSlotsGone('s1')
+T.check(#gone == 1 and gone[1][1] == 7 and gone[1][2] == 3, 'slot 7 (serial 3) let go: ' .. #gone)
+T.check(S.objects[staged[1].id] == nil and S.objects[staged[2].id] == nil, 'pieces deleted')
+-- a block in the shown block's bank is not staged (its materials show that block's photo)
+T.check(terrain.swap('/t/f3.ter', 2, 512, 256, 0, 0, { materials = otherMats }, '/t/f3_base.png', 512, fine), 'f3')
+terrain.finePrepare({ ter = '/t/f4.ter', fine = fine, base = '/t/f4_base.png' })
+terrain.fineStep()
+T.check(terrain.fineStatus().staged == 0, 'same bank: made at its swap')
 T.done('test_terrain_swap')

@@ -178,7 +178,8 @@ TERRAIN = {"cx": F(NUM), "cy": F(NUM), "heightmap": F(str), "size": F(int), "squ
            "zBase": F(NUM), "maxHeight": F(NUM), "q": F(NUM),
            "layers": F(list, OPT), "materials": F(list, OPT),     # --surface on (surface.py)
            "base": F(str, OPT), "baseSize": F(NUM, OPT),           # --near-visual detail: the block's photo
-           "ter": F(str, OPT)}                                     # the block as a .ter (swapped in, no import)
+           "ter": F(str, OPT),                                     # the block as a .ter (swapped in, no import)
+           "fine": F(dict, OPT)}                                   # BNE_FINE=on: its fine ground (finepatch.py)
 SERVER_TO_MOD = {
     "server_list": {"servers": F(list, OPT), "error": F(str, OPT)},   # earthd.server_list (the list service)
     "geocode_result": {"id": F(int), "results": F(list), "error": F(str, OPT)},   # geocode.py (Photon)
@@ -471,10 +472,13 @@ class SessionsAgreementTest(test_server.ServerHarness):
     def test_mod_side(self):
         core = (LUA / "core.lua").read_text(encoding="utf-8")
         far = (LUA / "farfield.lua").read_text(encoding="utf-8")
+        roads_lua = (LUA / "roads.lua").read_text(encoding="utf-8")
         for kind in ("hello", "pose"):
             t = next(lua_tables(core, m.end() - 1) for m in re.finditer(r"net\.send\(\{", core)
                      if f"type = '{kind}'" in lua_tables(core, m.end() - 1))
-            self.assertIn("sessions = farfield.heldSessions()", t, kind)
+            self.assertIn("sessions = roads.allHeldSessions()", t, kind)
+        # (the far field's folders and the road tiles' kept across a server restart: their buildings, 2026-10-31)
+        self.assertIn("require('beamngEarth/farfield').heldSessions(), M.heldSessions()", roads_lua)
         self.assertIn("'^/temp/beamngEarth/([^/]+)/'", far)
         self.assertEqual(self.server.vfs_dir, f"/temp/beamngEarth/{self.server.sid}")
         self.assertEqual(modsim.folder_of(self.server.vfs_dir + "/far_1_0_0_0.cdae"), self.server.sid)

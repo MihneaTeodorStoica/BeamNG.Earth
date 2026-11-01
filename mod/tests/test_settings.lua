@@ -406,6 +406,17 @@ do
   T.check(st.HIDDEN.updateDismissed, 'updateDismissed: not on the settings page')
 end
 
+-- the world server's share of the CPU (GitHub #529): on the page, the defaults as before (server cpupin.player_settings)
+do
+  local st = require('beamngEarth/settings')
+  T.check(st.SCHEMA.serverCores.kind == 'enum' and st.SCHEMA.serverCores.default == 'auto', 'serverCores: auto by default')
+  T.check(st.SCHEMA.serverPriority.kind == 'enum' and st.SCHEMA.serverPriority.default == 'low', 'serverPriority: low by default')
+  T.check(st.validate('serverCores', '2') == '2' and st.validate('serverPriority', 'normal') == 'normal', 'the choices')
+  local on = {}
+  for _, k in ipairs(st.ORDER) do on[k] = true end
+  T.check(on.serverCores and on.serverPriority, 'both on the settings page')
+end
+
 -- the map holds off the car's controls (the user, 2026-10-21: the controller drove the car behind the map): the stock
 -- groups and every driving action by name
 do
@@ -465,6 +476,21 @@ do
   os.clock = saved.clock
   saved.clock = nil
   for k, v in pairs(saved) do rawset(_G, k, v) end
+end
+
+-- The map's other players in a BeamMP session: none is nil, not an empty table (it reaches EarthMap.vue as {}, not
+-- [], and the map's .map() threw every second: the map stopped drawing in multiplayer; PR #509 by Astel123457).
+do
+  local b0, m0 = package.loaded['beamngEarth/beammp'], package.loaded['beamngEarth/mpsession']
+  local others = {}
+  package.loaded['beamngEarth/beammp'] = { inSession = function() return true end }
+  package.loaded['beamngEarth/mpsession'] = { others = function() return others end }
+  local ok, st = pcall(settings.uiMapState)
+  T.check(ok and st.others == nil, 'map in a session, no other players: others nil')
+  others = { { name = 'a', lat = 1, lon = 2 } }
+  ok, st = pcall(settings.uiMapState)
+  T.check(ok and type(st.others) == 'table' and #st.others == 1, 'map in a session, one other player: listed')
+  package.loaded['beamngEarth/beammp'], package.loaded['beamngEarth/mpsession'] = b0, m0
 end
 
 -- #44: dashboard visibility is a persisted player setting.

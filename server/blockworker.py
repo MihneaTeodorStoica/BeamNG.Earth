@@ -375,6 +375,8 @@ def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None,
     if ter_name is not None:
         t1 = time.perf_counter()
         idx = _tunnel_holes(aid, frame, elev, keep, cx, cy, idx, info, g)
+        import finepatch            # (sharp graded ground: holes here, a finer mesh beside the .ter fills them)
+        idx = finepatch.apply(frame, gen, raw, keep, cx, cy, size, out_dir, ter_name[:-4] + "_fine", aid, idx, info)
         info["ter"], mats = surfacemod.write_ter(out_dir, ter_name, keep["qgrid"], idx)
         if mats is not None:          # the .ter's own material list (MATERIALS indices)
             info["mats"] = mats
@@ -736,6 +738,7 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
     mark("airports")
     x0, y0, _, _ = box
     if items is not None:               # front doors and shopfronts, driveways into the road mesh
+        props[:] = furniture.off_buildings(props, buildingsmod.near_rings(frame, tx, ty, _s.md, skip=skip))     # (no street tree in a house)
         drives = []
         props.extend(buildingsmod.doors(items, lines, x0, y0, drives))
         props.extend(buildingsmod.toll_booth_rows(items, x0, y0))
@@ -757,6 +760,7 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
     # roads.deck_pads)
     try:
         pad_parts = list(bridges.parts(cells, (box[0] - 40, box[1] - 40, box[2] + 40, box[3] + 40)))
+        pad_parts = roadsmod.shifted_parts(pad_parts, roadsmod.deck_shift_fn(frame, cells, urban, _s.widths, left_hand))
         pads_near = roadsmod.deck_pads([(f, sp, xy, z) for f, sp, xy, z, _lon in pad_parts], near_roads, box,
                                        bridges._ground, own=False)
     except Exception as ex:
@@ -775,7 +779,7 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
         guardrail_rows = guardrailsmod.forest_rows(frame, infra_fn, box, elev,
                                                    decks=guardrail_decks, parapets=parapets,
                                                    bridge_rails=roadmeshmod.BRIDGE_RAILS,
-                                                   supported_decks_out=low_parapet_decks)
+                                                   supported_decks_out=low_parapet_decks, roads=near_roads)
     except Exception as ex:
         log.warning("mapped guardrails: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
         low_parapet_decks.clear()
@@ -1826,7 +1830,8 @@ def _imagery(tex):
     return _s.imagery[1]
 
 
-def base_photo(lat, lon, x0, y0, size, px, tex, buildings, rock_zoom, path, cache, fuel_pads=None, out_px=None):
+def base_photo(lat, lon, x0, y0, size, px, tex, buildings, rock_zoom, path, cache, fuel_pads=None, out_px=None,
+               quick=False):
     """earthd.Server.write_base here, for a server without its imagery analyses (a small machine): the block's base
     photo from the imagery tiles on disk, its building footprints filled and its cliffs as rock, written to path
     (PNG) and packed into the game's terrain texture cache (cache: terraincache.base_entry's arguments but the rgb).
@@ -1834,7 +1839,9 @@ def base_photo(lat, lon, x0, y0, size, px, tex, buildings, rock_zoom, path, cach
     server renders it, fetching what is missing). In the server process it ran 2 s alone but 8-11 s next to the
     rest of the world's threads on a Steam Deck (one interpreter lock), and the next block waited for it. fuel_pads:
     the gas station pads around it (_take_pads). px: the imagery's render size, out_px: the photo's (enlarged before
-    the roads are painted in: earthd.BASE_PX)."""
+    the roads are painted in: earthd.BASE_PX). quick: earthd.Server.write_quick_base's stand-in (the imagery and the
+    roads at px, then enlarged; no roofs' mask, road ghosts or rock): the main process's ran 5-6 s beside the rest of
+    its threads at 185 mph (2026-10-31), here ~1 s."""
     _take_pads(fuel_pads)
     import imagery as imagerymod
     import roads as roadsmod
@@ -1850,6 +1857,22 @@ def base_photo(lat, lon, x0, y0, size, px, tex, buildings, rock_zoom, path, cach
     except imagerymod.ImageryError:
         return None
     rgb = np.asarray(rgb, np.uint8)
+    if quick:
+        import surface as surfacemod
+        if roadsmod.ROADS_IN_GROUND:
+            try:
+                rgb = surfacemod.paint_square(rgb, frame, x0, y0, size, getattr(_s, "surface", None), _s.widths,
+                                              simple=True)
+            except Exception as e:      # the stand-in stays as it is
+                log.debug("quick base photo: roads: %s", e)
+        rgb = np.array(surfacemod.enlarge(rgb, out_px or px), np.uint8)
+        tmp = staging.tmp_for(path)
+        with open(tmp, "wb") as f:
+            f.write(terraincache.stored_png(rgb))
+        staging.replace(tmp, path)
+        user_dir, base_vfs, ao_vfs, ao_value = cache
+        terraincache.base_entry(user_dir, base_vfs, ao_vfs, rgb, ao_value)
+        return rgb, used, pending
     if buildings and _s.md is not None:
         try:
             mask = buildingsmod.photo_mask(frame, x0, y0, size, px, _s.md)

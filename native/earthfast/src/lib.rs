@@ -1,6 +1,7 @@
 //! Geometry kernels for the world server (server/fast.py wraps them, with the Python versions as the fallback).
 //! All coordinates are metres in the anchor's local frame, f64.
 mod gpu;
+mod finepatch;
 mod dsm;
 mod vegmask;
 mod roadgeom;
@@ -15,6 +16,7 @@ mod tunnelcover;
 mod gradesep;
 mod lamps;
 mod decks;
+mod tapers;
 mod islands;
 mod ribbons;
 mod groundpaint;
@@ -1408,8 +1410,9 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
                      base: PyReadonlyArray1<'py, f64>, a: PyReadonlyArray2<'py, f64>, b: PyReadonlyArray2<'py, f64>,
                      za: PyReadonlyArray1<'py, f64>, zb: PyReadonlyArray1<'py, f64>, h: PyReadonlyArray1<'py, f64>,
                      rh: PyReadonlyArray1<'py, f64>, rid: PyReadonlyArray1<'py, i64>, abut: PyReadonlyArray1<'py, u8>, cut: PyReadonlyArray2<'py, f64>,
-                     ba: PyReadonlyArray1<'py, f64>, bb: PyReadonlyArray1<'py, f64>, lift: f64, slope_run: f64,
-                     t_min: f64, t_max: f64, blend_r: f64,
+                     ba: PyReadonlyArray1<'py, f64>, bb: PyReadonlyArray1<'py, f64>, steep: PyReadonlyArray1<'py, u8>,
+                     link: PyReadonlyArray1<'py, u8>, extrap: f64,
+                     lift: f64, slope_run: f64, t_min: f64, t_max: f64, steep_run: f64, steep_t_min: f64, blend_r: f64,
                      bucket: f64, wall_cut: f64, wall_t: f64, wall_flat: f64, wall_ahead: f64,
                      sep: bool, sep_from: f64, sep_full: f64, core_fade: f64, side_fade: f64, sharp_step: f64)
                      -> Bound<'py, PyArray1<f64>> {
@@ -1420,6 +1423,14 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
     let cut = cut.as_array();               // (segments, 6): a cutting's wall, top and top offset, left then right
     // (segments): the cross slope at each segment's ends (m per m toward its left: a banked curve, grading.bank)
     let (ba, bb) = (ba.as_array(), bb.as_array());
+    // (segments): a mountain pass road's (grading.Plan.steep): its sides fall to the natural ground at steep_run, from
+    // steep_t_min, between its retaining wall and its parapet
+    let steep = steep.as_array();
+    // (segments): bit 0 the plan goes on before it, bit 1 after it. A point past such an end takes the segment's line
+    // carried on (up to extrap m), not its end height: on a grade the ends' heights blended in, before and after, made
+    // a washboard of the plan's vertex step (4 m, +-3.5 cm on the Stelvio's 10 %; the user, 2026-11-01: "the road
+    // still feels bumpy"). A plan's own end (a dead end, a cell's edge) keeps its end height.
+    let link = link.as_array();
     let banked: Vec<bool> = (0..h.len()).map(|s| ba[s] != 0.0 || bb[s] != 0.0).collect();
     let sharp = cut.iter().any(|v| v.is_finite());
     let has_cut: Vec<bool> = (0..h.len()).map(|s| (0..6).any(|k| cut[[s, k]].is_finite())).collect();
@@ -1508,6 +1519,13 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
                     let (ddx, ddy) = (qx - t * abx, qy - t * aby);
                     let d = (ddx * ddx + ddy * ddy).sqrt();       // (not hypot: libm's is ~5x dearer, the pairs loop's main cost)
                     let mut target = za[s] + (zb[s] - za[s]) * t;
+                    if link[s] != 0 && l2 > 1e-12 {
+                        let tu = (qx * abx + qy * aby) / l2;
+                        let e = extrap / l2.sqrt();
+                        let lo = if link[s] & 1 != 0 { -e } else { 0.0 };
+                        let hi = if link[s] & 2 != 0 { 1.0 + e } else { 1.0 };
+                        target = za[s] + (zb[s] - za[s]) * tu.clamp(lo, hi);
+                    }
                     if banked[s] && l2 > 1e-12 {    // (a banked curve: tilted across the carriageway, its edge height past)
                         let off = ((qy * abx - qx * aby) / l2.sqrt()).clamp(-rh[s], rh[s]);
                         target += (ba[s] + (bb[s] - ba[s]) * t) * off;
@@ -1572,7 +1590,9 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
                     let hs = if cwall.is_finite() { h[s].min(cwall) } else { h[s] };
                     let drop = cwall.is_finite() && !ctop.is_finite() && d > cwall;
                     let wall = beff[idx] - target > wall_cut && ahead < side && ahead < wall_ahead;
-                    let tt = if wall { wall_t } else { (slope_run * (target - beff[idx]).abs()).clamp(t_min, t_max) };
+                    let tt = if wall { wall_t }
+                             else if steep[s] != 0 { (steep_run * (target - beff[idx]).abs()).clamp(steep_t_min, t_max) }
+                             else { (slope_run * (target - beff[idx]).abs()).clamp(t_min, t_max) };
                     // a wall: flat on one terrain step behind it (no slope in front of its face), then up
                     let u = ((d - hs - if wall { wall_flat } else { 0.0 }) / tt).clamp(0.0, 1.0);
                     let w = 1.0 - u * u * (3.0 - 2.0 * u);
@@ -4076,28 +4096,77 @@ fn subdivide_tris<'py>(py: Python<'py>, pts: PyReadonlyArray2<'py, f64>, tris: P
 /// roadmesh.deck's parapet test: for each deck edge point p (m, 3) of deck owner op (m,), does another deck's surface
 /// lie there: a centre-line segment a -> b (s, 3) of another owner (os, (s,)) nearer in plan than its half width hw (s,)
 /// with its height there within dz of the point's (a ramp leaving the mainline, the carriageways of one road side by
-/// side: no wall between them, 2026-10-17).
+/// side: no wall between them, 2026-10-17). ends (s,): per segment bit 0 its start, bit 1 its end is the deck's own
+/// end, square: nothing at it (within 0.1 m) or past it is under it (a deck going on from another's end at a merge on I-95
+/// by the Middle Branch, 2026-10-31: the round end hid both parapets for 7 m).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (p, op, a, b, hw, os, dz, ends=None))]
 fn deck_edges_covered<'py>(py: Python<'py>, p: PyReadonlyArray2<'py, f64>, op: PyReadonlyArray1<'py, i64>,
                            a: PyReadonlyArray2<'py, f64>, b: PyReadonlyArray2<'py, f64>, hw: PyReadonlyArray1<'py, f64>,
-                           os: PyReadonlyArray1<'py, i64>, dz: f64) -> Bound<'py, PyArray1<bool>> {
+                           os: PyReadonlyArray1<'py, i64>, dz: f64, ends: Option<PyReadonlyArray1<'py, i64>>)
+                           -> Bound<'py, PyArray1<bool>> {
     let (pv, opv, av, bv, hv, osv) = (p.as_array(), op.as_array(), a.as_array(), b.as_array(), hw.as_array(), os.as_array());
+    let ev: Vec<i64> = match &ends {
+        Some(e) => e.as_array().iter().copied().collect(),
+        None => vec![0; av.shape()[0]],
+    };
     let out: Vec<bool> = release(py, pv.shape()[0] * av.shape()[0].max(1), || {
         let ns = av.shape()[0];
         // per segment: start, direction, squared length, half width, z at both ends, owner
-        let seg: Vec<[f64; 9]> = (0..ns).map(|k| {
+        let seg: Vec<[f64; 10]> = (0..ns).map(|k| {
             let (a0, a1, a2) = (av[[k, 0]], av[[k, 1]], av[[k, 2]]);
             let (ab0, ab1) = (bv[[k, 0]] - a0, bv[[k, 1]] - a1);
-            [a0, a1, ab0, ab1, (ab0 * ab0 + ab1 * ab1).max(1e-9), hv[k], a2, bv[[k, 2]], osv[k] as f64]
+            [a0, a1, ab0, ab1, (ab0 * ab0 + ab1 * ab1).max(1e-9), hv[k], a2, bv[[k, 2]], osv[k] as f64,
+             ev.get(k).copied().unwrap_or(0) as f64]
         }).collect();
+        const BAND_M: f64 = 0.5;        // m: the band inside hw along a deck's edges (roadmesh.PARAPET_W, 0.45)
+        const END_M: f64 = 1.0;
+        // per segment its deck's square ends (point, unit direction into the deck), where it has them: the segments
+        // from a start (bit 0) to the next end (bit 1) are one deck's
+        let mut planes: Vec<(Option<[f64; 4]>, Option<[f64; 4]>)> = vec![(None, None); ns];
+        let mut k = 0;
+        while k < ns {
+            if ev.get(k).copied().unwrap_or(0) & 1 == 0 {
+                k += 1;
+                continue;
+            }
+            let mut e = k;
+            while e < ns && ev.get(e).copied().unwrap_or(0) & 2 == 0 {
+                e += 1;
+            }
+            if e >= ns {
+                break;
+            }
+            let (gs, ge) = (&seg[k], &seg[e]);
+            let (ls, le) = (gs[4].sqrt(), ge[4].sqrt());
+            let start = [gs[0], gs[1], gs[2] / ls, gs[3] / ls];
+            let end = [ge[0] + ge[2], ge[1] + ge[3], -ge[2] / le, -ge[3] / le];
+            for q in planes.iter_mut().take(e + 1).skip(k) {
+                *q = (Some(start), Some(end));
+            }
+            k = e + 1;
+        }
         (0..pv.shape()[0]).map(|i| {
             let (p0, p1, p2, o) = (pv[[i, 0]], pv[[i, 1]], pv[[i, 2]], opv[i] as f64);
-            seg.iter().any(|g| {
+            seg.iter().zip(planes.iter()).any(|(g, pl)| {
                 if g[8] == o { return false; }
                 let t = (((p0 - g[0]) * g[2] + (p1 - g[1]) * g[3]) / g[4]).clamp(0.0, 1.0);
                 let d = (p0 - (g[0] + t * g[2])).hypot(p1 - (g[1] + t * g[3]));
-                d < g[5] && (p2 - (g[6] + t * (g[7] - g[6]))).abs() < dz
+                if !(d < g[5] && (p2 - (g[6] + t * (g[7] - g[6]))).abs() < dz) {
+                    return false;
+                }
+                // at or past the deck's square end; within END_M of it only over its slab, not its edge's band (a
+                // deck going on at a slight angle from this one's end, their outer edges flush: its corner was in
+                // the band, both parapets gone there)
+                let edge_band = d > g[5] - BAND_M;
+                for q in [pl.0, pl.1].into_iter().flatten() {
+                    let into = (p0 - q[0]) * q[2] + (p1 - q[1]) * q[3];
+                    if into < 0.1 || (edge_band && into < END_M) {
+                        return false;
+                    }
+                }
+                true
             })
         }).collect()
     });
@@ -5195,6 +5264,14 @@ fn earthfast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lamps::lamp_stations, m)?)?;
     m.add_function(wrap_pyfunction!(decks::deck_beside, m)?)?;
     m.add_function(wrap_pyfunction!(decks::deck_end_joins, m)?)?;
+    m.add_function(wrap_pyfunction!(tapers::road_tapers, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_holes, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_rim, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_points, m)?)?;
+    m.add_function(wrap_pyfunction!(finepatch::fine_mesh, m)?)?;
+    m.add_function(wrap_pyfunction!(tapers::lane_flow, m)?)?;
+    m.add_function(wrap_pyfunction!(tapers::lane_shifts, m)?)?;
     m.add_function(wrap_pyfunction!(decks::deck_gaps, m)?)?;
     m.add_function(wrap_pyfunction!(decks::deck_end_on, m)?)?;
     m.add_function(wrap_pyfunction!(decks::deck_pad, m)?)?;
@@ -5332,6 +5409,6 @@ fn earthfast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fartex::season_img, m)?)?;
     m.add_function(wrap_pyfunction!(fartex::dds_levels, m)?)?;
     m.add_function(wrap_pyfunction!(fartex::jpeg_rgb, m)?)?;
-    m.add("VERSION", 116)?;
+    m.add("VERSION", 125)?;
     Ok(())
 }

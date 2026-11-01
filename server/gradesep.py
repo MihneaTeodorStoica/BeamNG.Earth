@@ -82,6 +82,20 @@ _POOL = None
 _POOL_LOCK = threading.Lock()
 
 
+def neighbours_hook(md, key):
+    """The callable a cell's roads layer carries (roads.lane_flow): the roads layers of the eight cells round it
+    (_neighbours), asked once per decoded layer."""
+    lock = threading.Lock()
+    memo = {}
+
+    def run():
+        with lock:
+            if "n" not in memo:
+                memo["n"] = _neighbours(md, key)
+        return memo["n"]
+    return run
+
+
 def _neighbours(md, key):
     """The roads layers of the eight cells round key, asked at once (one after another, cold, they held a fresh
     place's first road tile ~7 s: 2026-10-27 A/B)."""

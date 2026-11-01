@@ -87,6 +87,19 @@ export const settingsSchema = [
     ],
   },
   {
+    name: "Performance",
+    intro: "How much of your CPU the BeamNG.Earth app may use to build the world around you. Takes effect the next time you start BeamNG.Earth.",
+    items: [
+      { id: "serverCores", type: "select", default: "auto", name: "World server CPU cores", desc: "The CPU cores the app builds the map on; the game keeps the others. Auto: a quarter of your cores (one on a 4-core CPU). On an older CPU where the map loads slowly or pauses while you drive, 2 can load it much faster, at a few frames per second. The app never takes more than half your cores.",
+        note: "Takes effect the next time you start BeamNG.Earth.",
+        options: [ { label: "Auto", value: "auto" }, { label: "1", value: "1" }, { label: "2", value: "2" }, { label: "3", value: "3" }, { label: "4", value: "4" }, { label: "6", value: "6" }, { label: "8", value: "8" } ] },
+      { id: "serverPriority", type: "select", default: "low", name: "World server priority", desc: "Low (the default): the game always comes first, the map can take longer to load. Normal: the app gets its fair share, so the map loads faster on a busy CPU, at a few frames per second.",
+        note: "Takes effect the next time you start BeamNG.Earth.",
+        options: [ { label: "Low", value: "low" }, { label: "Normal", value: "normal" } ] },
+      { id: "teleportPriority", type: "bool", default: false, name: "Full priority loading", desc: "When you join the world and after a teleport, the app builds the place on every CPU core and the game keeps only two, until the place around you has finished loading. The new place loads much faster; the game runs at a lower frame rate meanwhile. Takes effect at your next teleport or the next time you join." },
+    ],
+  },
+  {
     name: "Feedback",
     items: [
       { id: "reportOpen", type: "feedback", what: "report", label: "Report", name: "Report an issue or idea", desc: "Closes this page, takes a screenshot, the location, the frame rate and your hardware and graphics settings, then opens a window to pick the kind (map issue, performance issue, bug, idea), give a title and describe it. Saves a ready-to-post GitHub issue (issue.md). Also Ctrl+Shift+E while driving." },
