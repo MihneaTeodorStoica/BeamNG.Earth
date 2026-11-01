@@ -95,7 +95,8 @@ You can help support development by reporting [issues](https://github.com/TecnaG
 - Buildings, sidewalks, curbs and bridge decks are solid (lean collision meshes near the car keep the
   physics' collision rebuilds cheap).
 - Real bridge and tunnel heights where open data measures them: in the US, bridge decks follow the USGS 3DEP lidar
-  measured along each bridge; in France (IGN BD TOPO) and Norway (NVDB), bridges and tunnels follow the national road
+  measured along each bridge, and so do the roads leading onto them up to where they are back on the ground
+  (`BNE_APPROACH_LIDAR=off` turns that part off); in France (IGN BD TOPO) and Norway (NVDB), bridges and tunnels follow the national road
   databases' heights, and so do roads where the terrain data is coarse. Elsewhere, or where a source has nothing,
   the heights are estimated as before. The environment variables `BNE_ROADZ=off` (all of it) and
   `BNE_LIDAR_DECKS=off` (the US lidar only) turn it off.

@@ -262,6 +262,9 @@ def _rule_value(table, i):
     return None if j < 0 else table.value[j]
 
 
+HOME_RANGES_ON = os.environ.get("BNE_HOME_RANGES", "on") != "off"
+
+
 def home_copy(feats, i):
     """(feats', j) of feature i's copy in its home cell (the cell of its first point, among the eight round feats'
     cell: mapdata's _bnge_neighbours), None where that is this cell or not at hand. A road's copies in the cells it
@@ -298,7 +301,7 @@ def level_ranges(feats, i, _home=True):
     Its home cell's copy's (home_copy): lengthened over the roads crossing under it and joined over the lidar's
     elevated stretches, the copy in each cell saw other roads (a ramp by I-395 in Baltimore: one deck from 9.5 % in
     one cell, two with a ground gap at 14-16 % in the next, both drawn, one 8 m under the other)."""
-    if _home:
+    if _home and HOME_RANGES_ON:
         h = home_copy(feats, i)
         if h is not None:
             return level_ranges(h[0], h[1], _home=False)
