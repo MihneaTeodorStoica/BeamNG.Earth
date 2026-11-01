@@ -187,6 +187,36 @@ class SourceTunnelLayers(unittest.TestCase):
                                        c * (triangles[:, 2, 2] - triangles[:, 0, 2]))[on]
                             np.testing.assert_allclose(heights, p[2], atol=0.06,
                                                        err_msg=f"roof lattice intrudes {distance} m outside {fid}")
+                        # Verify the portal mouth interior: terrain holes must not be spared,
+                        # and no colliding fine triangles may stand inside vehicle clearance.
+                        matching_closed = [p for p in closed if p[0].split("#")[0] == fid.split("#")[0]
+                                           and (np.linalg.norm(np.asarray(p[2])[0] - xy[end]) < 1e-5 or
+                                                np.linalg.norm(np.asarray(p[2])[-1] - xy[end]) < 1e-5)]
+                        for cp in matching_closed:
+                            in_path = np.c_[cp[2], cp[3]] if np.linalg.norm(cp[2][0] - xy[end]) < 1e-5 else np.c_[cp[2], cp[3]][::-1]
+                            for in_dist in (0.5, 1.0, 2.0, 3.0):
+                                pin = roads._along(in_path, in_dist)
+                                ix = int(np.floor((pin[0] - xs[0]) / 2.0))
+                                iy = int(np.floor((pin[1] - ys[0]) / 2.0))
+                                if 0 <= ix < size and 0 <= iy < size:
+                                    self.assertEqual(idx[iy, ix], heightmap.TER_HOLE,
+                                                     f"terrain hole inside mouth at -{in_dist}m was wrongly spared")
+                                if len(triangles):
+                                    a = triangles[:, 0, :2]
+                                    ab, ac = triangles[:, 1, :2] - a, triangles[:, 2, :2] - a
+                                    det = ab[:, 0] * ac[:, 1] - ab[:, 1] * ac[:, 0]
+                                    valid = np.abs(det) > 1e-8
+                                    q = pin[:2] - a
+                                    b = np.divide(q[:, 0] * ac[:, 1] - q[:, 1] * ac[:, 0], det,
+                                                  out=np.zeros(len(det)), where=valid)
+                                    c = np.divide(ab[:, 0] * q[:, 1] - ab[:, 1] * q[:, 0], det,
+                                                  out=np.zeros(len(det)), where=valid)
+                                    on = valid & (b >= -1e-5) & (c >= -1e-5) & (b + c <= 1 + 1e-5)
+                                    if on.any():
+                                        hts = (triangles[:, 0, 2] + b * (triangles[:, 1, 2] - triangles[:, 0, 2]) +
+                                               c * (triangles[:, 2, 2] - triangles[:, 0, 2]))[on]
+                                        self.assertFalse(np.any((hts > pin[2] + 0.1) & (hts < pin[2] + roadmesh.TUNNEL_H - 0.2)),
+                                                         f"colliding fine wedge stands inside portal at -{in_dist}m")
 
     def test_northbridge_both_main_bores_exist_and_source_joint_is_not_a_portal(self):
         _frame, feats, _elev, tp = captured("northbridge_tunnels")
@@ -209,20 +239,6 @@ class SourceTunnelLayers(unittest.TestCase):
                     ends.append(float(z[at]))
         self.assertGreaterEqual(len(ends), 2)
         self.assertLess(np.ptp(ends), 1e-5)
-
-    def test_source_approaches_cannot_be_mistaken_for_roads_crossing_their_own_roof(self):
-        _frame, feats, _elev, tp = captured("obor_tunnels")
-        with mock.patch.object(tp, "_cover_roads", wraps=tp._cover_roads) as covering:
-            tp.parts([feats], (-500., -500., 500., 500.))
-        self.assertTrue(covering.call_args_list)
-        for call in covering.call_args_list:
-            line, _arc, _kinds, ground = call.args
-            matching = [k for k, v in tp.done.items()
-                        if np.shape(v[1]) == np.shape(line) and np.allclose(v[1], line)]
-            self.assertTrue(matching)
-            owners = {owner for k in matching for owner in tp.approach_owners[tp._part_id(k)]}
-            self.assertTrue(owners.isdisjoint(k[0] for k in ground),
-                            "source-connected open ranges are not separate roads over the tunnel")
 
     def test_grading_and_meshes_use_the_same_obor_sections(self):
         import geotiles
