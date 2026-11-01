@@ -96,6 +96,7 @@ import gasstations as gasstationsmod  # noqa: E402
 import roads as roadsmod  # noqa: E402
 import rails as railsmod  # noqa: E402
 import randomplace as randomplacemod  # noqa: E402
+import urgency as urgencymod  # noqa: E402
 import placepreview as placepreviewmod  # noqa: E402
 import pools as poolsmod  # noqa: E402
 import plancache as plancachemod  # noqa: E402
@@ -1132,6 +1133,7 @@ class Server:
         (the plans are the planning regions', whatever the anchor) at the active anchor's DEM zoom."""
         if self.veg is None:
             return None
+        urgencymod.wait_turn()          # (a block the game waits for first: urgency.py)
         import geotiles
         anchor = self.anchors.get(aid) or (self.anchors[max(self.anchors)] if self.anchors else None)
         if anchor is None:
@@ -1972,7 +1974,7 @@ class Server:
                     self.layout.block, self.out_dir, self.hm_name(key), self.ter_name(key),
                     fuel_pads=self.block_fuel_pads(anchor, cx, cy, self.layout.block)).result()
                 self.hm_stage[key] = "its base photo"
-                return self._finish_heightmap(anchor, cx, cy, info, t0, base)
+                return self._finish_heightmap(anchor, cx, cy, info, t0, base, urgent=lane == LANE_REQUEST)
             self.hm_stage[key] = "the build in the server's process"
             urgent = getattr(self.dem, "urgent", None)     # (test DEMs have no lane)
             with urgent() if urgent is not None else contextlib.nullcontext():     # the player waits for it (teleport,
@@ -2090,7 +2092,7 @@ class Server:
         if mats is not None:          # the .ter's own material list (MATERIALS indices)
             info["mats"] = mats
         info["stages"] = stages
-        return self._finish_heightmap(anchor, cx, cy, info, t0, base)
+        return self._finish_heightmap(anchor, cx, cy, info, t0, base, urgent=True)       # (a teleport's, a first block: waited for)
 
     def tunnels_of(self, anchor, elev, g):
         """anchor.tunnels (roads.TunnelProfiles), made now if not yet (elev: the caller's ground; g: the anchor's
@@ -2222,7 +2224,16 @@ class Server:
         else:
             self.base_stale.add(key)
 
-    def _finish_heightmap(self, anchor, cx, cy, info, t0, base=None):
+    def _finish_heightmap(self, anchor, cx, cy, info, t0, base=None, urgent=False):
+        """_finish_heightmap_now; a block the game asked for (urgent) waiting for its photo: urgent work (urgency.py),
+        the background jobs in this process wait to start meanwhile (its stand-in photo, 0.2 s of work, took 5 s and
+        more beside the far tiles' and the vegetation's, the edge guard holding the car at 130-175 mph, 2026-10-31)."""
+        if urgent and base is not None and not base.done():
+            with urgencymod.urgent():
+                return self._finish_heightmap_now(anchor, cx, cy, info, t0, base)
+        return self._finish_heightmap_now(anchor, cx, cy, info, t0, base)
+
+    def _finish_heightmap_now(self, anchor, cx, cy, info, t0, base=None):
         """The base photo (detail mode; rendered here: the imagery corrections live in this process; base: its
         future from _base_photo, started with the heights), the timings."""
         if base is not None:
@@ -2785,6 +2796,10 @@ class Server:
         return self.imagery.render(frame, *imagerymod.gutter_square(x0, y0, size, px), px, pending=pending)
 
     def make_tile(self, anchor, tile, prev=None):
+        urgencymod.wait_turn()          # (a block the game waits for first: urgency.py)
+        return self._make_tile(anchor, tile, prev)
+
+    def _make_tile(self, anchor, tile, prev=None):
         """Worker thread: build and write one far tile (and its texture). Returns its TileInfo.
         prev: the tile's stale TileInfo (--colormatch): only its texture is rendered again.
         A global tile (farfield.GTile) is built in its own frame, the same for every anchor (ck (GLOBAL_AID, key));
