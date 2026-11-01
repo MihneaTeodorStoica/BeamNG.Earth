@@ -108,6 +108,9 @@ M.SCHEMA = {
   serverCores = { kind = 'enum', default = 'auto', values = { 'auto', '1', '2', '3', '4', '6', '8' },
     label = 'World server CPU cores' },
   serverPriority = { kind = 'enum', default = 'low', values = { 'low', 'normal' }, label = 'World server priority' },
+  -- after a teleport the server on every CPU core and the game on two, until the new place is loaded (server
+  -- cpupin.full_split, read at each teleport; the user, 2026-10-31)
+  teleportPriority = { kind = 'bool', default = false, label = 'Full priority loading (joining, teleports)' },
   -- the GPS route's data fetched ahead (the server's route_download; sent with each route): none, the next 12 miles
   -- (20 km), or the whole route (up to 300 miles)
   routeDownload = { kind = 'enum', default = 'ahead', values = { 'off', 'ahead', 'route' },
@@ -125,7 +128,7 @@ M.ORDER = { 'quality', 'framePacing', 'terrainDetail', 'groundPhoto', 'trees', '
   'weatherMode', 'realGravity', 'groundCover', 'groundCoverDensity', 'rocks', 'roads', 'highwaySigns', 'dashboardSatellite',
   'hudVisible', 'statusBar',
   'placeNamesOnline', 'creditsVisible', 'beammpOnLaunch',
-  'creditsCorner', 'creditsSize', 'cacheCapGb', 'routeDownload', 'serverCores', 'serverPriority', 'devOutlineKm',
+  'creditsCorner', 'creditsSize', 'cacheCapGb', 'routeDownload', 'serverCores', 'serverPriority', 'teleportPriority', 'devOutlineKm',
   'devMapKm' }
 
 -- Stored but not on the settings page

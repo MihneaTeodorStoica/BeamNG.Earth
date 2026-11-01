@@ -1827,7 +1827,8 @@ def _imagery(tex):
     return _s.imagery[1]
 
 
-def base_photo(lat, lon, x0, y0, size, px, tex, buildings, rock_zoom, path, cache, fuel_pads=None, out_px=None):
+def base_photo(lat, lon, x0, y0, size, px, tex, buildings, rock_zoom, path, cache, fuel_pads=None, out_px=None,
+               quick=False):
     """earthd.Server.write_base here, for a server without its imagery analyses (a small machine): the block's base
     photo from the imagery tiles on disk, its building footprints filled and its cliffs as rock, written to path
     (PNG) and packed into the game's terrain texture cache (cache: terraincache.base_entry's arguments but the rgb).
@@ -1835,7 +1836,9 @@ def base_photo(lat, lon, x0, y0, size, px, tex, buildings, rock_zoom, path, cach
     server renders it, fetching what is missing). In the server process it ran 2 s alone but 8-11 s next to the
     rest of the world's threads on a Steam Deck (one interpreter lock), and the next block waited for it. fuel_pads:
     the gas station pads around it (_take_pads). px: the imagery's render size, out_px: the photo's (enlarged before
-    the roads are painted in: earthd.BASE_PX)."""
+    the roads are painted in: earthd.BASE_PX). quick: earthd.Server.write_quick_base's stand-in (the imagery and the
+    roads at px, then enlarged; no roofs' mask, road ghosts or rock): the main process's ran 5-6 s beside the rest of
+    its threads at 185 mph (2026-10-31), here ~1 s."""
     _take_pads(fuel_pads)
     import imagery as imagerymod
     import roads as roadsmod
@@ -1851,6 +1854,22 @@ def base_photo(lat, lon, x0, y0, size, px, tex, buildings, rock_zoom, path, cach
     except imagerymod.ImageryError:
         return None
     rgb = np.asarray(rgb, np.uint8)
+    if quick:
+        import surface as surfacemod
+        if roadsmod.ROADS_IN_GROUND:
+            try:
+                rgb = surfacemod.paint_square(rgb, frame, x0, y0, size, getattr(_s, "surface", None), _s.widths,
+                                              simple=True)
+            except Exception as e:      # the stand-in stays as it is
+                log.debug("quick base photo: roads: %s", e)
+        rgb = np.array(surfacemod.enlarge(rgb, out_px or px), np.uint8)
+        tmp = staging.tmp_for(path)
+        with open(tmp, "wb") as f:
+            f.write(terraincache.stored_png(rgb))
+        staging.replace(tmp, path)
+        user_dir, base_vfs, ao_vfs, ao_value = cache
+        terraincache.base_entry(user_dir, base_vfs, ao_vfs, rgb, ao_value)
+        return rgb, used, pending
     if buildings and _s.md is not None:
         try:
             mask = buildingsmod.photo_mask(frame, x0, y0, size, px, _s.md)

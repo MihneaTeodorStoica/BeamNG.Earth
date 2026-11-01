@@ -740,17 +740,21 @@ def _fill_island_photos(rgb, polys):
     return np.asarray(im)
 
 
-def photo_roads(rgb, frame, x0, y0, size, feats_list, urban_fn=None, widths=None):
+def photo_roads(rgb, frame, x0, y0, size, feats_list, urban_fn=None, widths=None, simple=False):
     """The photo rgb (H x W x 3, row 0 = north, covering [x0, x0 + size] x [y0, y0 + size] of frame) with the
     carriageways of feats_list (road Features: roads.road_specs widths, ground parts only) painted in, antialiased
     (earthfast.paint_lines, PHOTO_ROAD_RGBA). Roundabout footprints are filled with grass first so the photo's old
-    through-road scar does not show; carriageways paint over the ring. Pure (a new array)."""
+    through-road scar does not show; carriageways paint over the ring. simple: the carriageways alone (a stand-in
+    photo, shown a second or two at speed: the junctions' corners were 1.3 s of its 2 s). Pure (a new array)."""
     fast.require(49, "roads in the ground")
     h, w = rgb.shape[:2]
-    # the rounded corners of curbless junctions (roadcorners.py) in the asphalt's colour, under the roads
-    rgb = photo_corners(rgb, frame, x0, y0, size, corner_pads(frame, x0, y0, size, feats_list, urban_fn, widths))
-    filled = _fill_island_photos(np.ascontiguousarray(rgb, np.uint8),
-                                 _island_pixel_polys(frame, x0, y0, size, w, h, feats_list, urban_fn, widths))
+    if simple:
+        filled = np.ascontiguousarray(rgb, np.uint8)
+    else:
+        # the rounded corners of curbless junctions (roadcorners.py) in the asphalt's colour, under the roads
+        rgb = photo_corners(rgb, frame, x0, y0, size, corner_pads(frame, x0, y0, size, feats_list, urban_fn, widths))
+        filled = _fill_island_photos(np.ascontiguousarray(rgb, np.uint8),
+                                     _island_pixel_polys(frame, x0, y0, size, w, h, feats_list, urban_fn, widths))
     got = _road_segments(frame, x0, y0, size, w, h, feats_list, urban_fn, widths)
     if got is None:
         return filled
@@ -801,18 +805,19 @@ def _square_lots(frame, x0, y0, size, surface):
     return surface.lots(la, lo)
 
 
-def paint_square(rgb, frame, x0, y0, size, surface, widths=None):
+def paint_square(rgb, frame, x0, y0, size, surface, widths=None, simple=False):
     """photo_roads for a ground photo over [x0, x0 + size]² of frame with the roads of surface's cached cells (a
     Surface; never waits); as it was when its texels are coarser than PHOTO_ROADS_MAX_TEXEL or no cell is cached.
     Parking lots are painted first (photo_lots), then gas-station pads, then the carriageways over both."""
     if surface is None or size / max(rgb.shape[1], 1) > PHOTO_ROADS_MAX_TEXEL:
         return rgb
-    rgb = photo_lots(rgb, frame, x0, y0, size, _square_lots(frame, x0, y0, size, surface))
-    rgb = photo_pads(rgb, frame, x0, y0, size, _square_pads(frame, x0, y0, size, surface))     # (under the roads)
+    if not simple:          # (simple, a stand-in's: the carriageways alone, photo_roads)
+        rgb = photo_lots(rgb, frame, x0, y0, size, _square_lots(frame, x0, y0, size, surface))
+        rgb = photo_pads(rgb, frame, x0, y0, size, _square_pads(frame, x0, y0, size, surface))     # (under the roads)
     feats = _square_roads(frame, x0, y0, size, surface)
     if not feats:
         return rgb
-    return photo_roads(rgb, frame, x0, y0, size, feats, surface.urban, widths)
+    return photo_roads(rgb, frame, x0, y0, size, feats, surface.urban, widths, simple=simple)
 
 
 def unghost_square(rgb, frame, x0, y0, size, surface, widths=None):

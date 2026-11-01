@@ -245,10 +245,19 @@ ROUTE_AHEAD_MAX_M = 20000.0      # --route-prefetch-km * 1000 (15-25 km is sane;
 ROUTE_DOWNLOAD_MODES = ("off", "ahead", "route")
 ROUTE_WHOLE_MAX_M = 500000.0
 ROUTE_RETRY_S = 2.0               # a deferred tile/cell backs off this long before the next one in the corridor
-FAST_BASE_V = 70.0              # m/s (157 mph): faster, a block waits at most BASE_FAST_WAIT_S for its photo after its
+# (70 m/s until 2026-10-31: at 130-157 mph each block waited 2.5 s for its photo, then its stand-in, the edge guard
+# holding the car; the user: "lower it or do whatever you need to do to get high speed driving viable". The stand-in
+# has the roads painted in and the last photos' overlap now, so the swap to the photo shows less)
+FAST_BASE_V = 40.0              # m/s (89 mph): faster, a block waits at most BASE_FAST_WAIT_S for its photo after its
 SMALL_FAST_BASE_V = 35.0        # m/s (78 mph): FAST_BASE_V on a small machine (budget.small: a Steam Deck)
 BASE_FAST_WAIT_S = 0.15         # heights, then goes without it (block_base later): blocks took 0.6-3 s at 600 mph on a
                                 # Steam Deck, mostly the photo (heights 0.1-0.4 s), and the game paused 11 times a minute
+# A block the game asked for has its photo rendered in the other lane's block process, its own core (_base_process),
+# with the imagery analyses on too (de-shadow, colour match: they live in this process; the photo is rendered again
+# with them, base_refresh): here, beside the far tiles' and the vegetation's work under this interpreter's lock, its
+# road paint (0.3 s alone) took 6-10 s and the blocks were ready 6-12 s after they were asked for, the edge guard
+# holding the car at 105-189 mph (2026-10-31, tools/perfmon.py). BNE_URGENT_ELSEWHERE=off: here, as before.
+URGENT_ELSEWHERE = os.environ.get("BNE_URGENT_ELSEWHERE", "on") != "off"
 QUICK_SYNC_MAX_V = 150.0        # m/s (335 mph): slower, a block built ahead gets its stand-in photo before it is ready (224 mph left a player at 230 mph with brown flashes)
 RECENT_FULL = 2                 # full ground photos kept for the stand-ins' overlap (write_quick_base)
 QUICK_MIN_COVER = 0.8          # share of a stand-in's texels real imagery must cover (else no stand-in)
@@ -1265,9 +1274,38 @@ class Server:
     boost_on = False
     boost_cpus = server_cpus = None
 
-    def load_boost(self, on, why=""):
+    boost_full = False
+
+    def load_boost(self, on, why="", full_only=False):
         """The loading boost (cpupin.boosted): the server's processes also on half of the game's cores while the
-        player waits after a teleport, back on their own when it moves or the far field is done."""
+        player waits after a teleport, back on their own when it moves or the far field is done. With the settings
+        page's teleportPriority (cpupin.full_split): the server on every core and the game on two, until the far field
+        and the roads round the car are done (moving does not end it); full_only: that alone (joining the world)."""
+        if on and not self.boost_on:
+            full = cpupin.full_split(self.server_cpus, getattr(self, "game_cpus", None)) \
+                if cpupin.player_settings(self.user_dir).get("teleport_full") else None
+            if full:
+                try:
+                    n = cpupin.pin_tree(full[0])
+                    g = cpupin.pin_game(full[1])
+                except OSError as e:
+                    log.warning("full priority loading: %s", e)
+                else:
+                    self.boost_on = self.boost_full = True
+                    log.info("full priority loading on (%s): %d server threads on CPUs %s, the game's %d on %s", why, n,
+                             ",".join(map(str, sorted(full[0]))), g, ",".join(map(str, sorted(full[1]))))
+                    return
+            if full_only:
+                return                  # (the half boost only after a teleport)
+        if not on and self.boost_full:
+            try:
+                cpupin.pin_tree(self.server_cpus)
+                cpupin.pin_game(getattr(self, "game_cpus", None))
+            except OSError as e:
+                log.warning("full priority loading: %s", e)
+            self.boost_on = self.boost_full = False
+            log.info("full priority loading off (%s)", why)
+            return
         if on and not self.boost_cpus:
             log.debug("load boost (%s): no cores to lend (--pin / --load-boost off, or too few cores)", why)
         on = bool(on) and bool(self.boost_cpus)
@@ -1974,7 +2012,7 @@ class Server:
                     self.layout.block, self.out_dir, self.hm_name(key), self.ter_name(key),
                     fuel_pads=self.block_fuel_pads(anchor, cx, cy, self.layout.block)).result()
                 self.hm_stage[key] = "its base photo"
-                return self._finish_heightmap(anchor, cx, cy, info, t0, base, urgent=lane == LANE_REQUEST)
+                return self._finish_heightmap(anchor, cx, cy, info, t0, base, urgent=lane == LANE_REQUEST, lane=lane)
             self.hm_stage[key] = "the build in the server's process"
             urgent = getattr(self.dem, "urgent", None)     # (test DEMs have no lane)
             with urgent() if urgent is not None else contextlib.nullcontext():     # the player waits for it (teleport,
@@ -2170,7 +2208,9 @@ class Server:
         """The block process that renders the base photo of a block built in lane (blockworker.base_photo): the
         other lane's, usually idle while this one builds the heights; None (rendered here) with the imagery
         analyses on (they live in this process) or without block processes."""
-        if not self.block_pools or self.imagery is None or self.deshadow is not None or self.colormatch is not None:
+        if not self.block_pools or self.imagery is None:
+            return None
+        if (self.deshadow is not None or self.colormatch is not None) and not (URGENT_ELSEWHERE and lane == LANE_REQUEST):
             return None
         return self.block_pools[LANE_PREFETCH if lane == LANE_REQUEST else LANE_REQUEST][0]
 
@@ -2210,6 +2250,10 @@ class Server:
             return None
         rgb, _, pending = got
         self._base_kept(anchor, cx, cy, pending)
+        if self.deshadow is not None or self.colormatch is not None:
+            # (rendered without the imagery analyses, which live in this process: rendered again here with them,
+            # base_refresh, as a photo rendered before they were done)
+            self.base_stale.add(key)
         photo.append(rgb)
         self.base_worker += 1
         return name
@@ -2224,16 +2268,16 @@ class Server:
         else:
             self.base_stale.add(key)
 
-    def _finish_heightmap(self, anchor, cx, cy, info, t0, base=None, urgent=False):
+    def _finish_heightmap(self, anchor, cx, cy, info, t0, base=None, urgent=False, lane=None):
         """_finish_heightmap_now; a block the game asked for (urgent) waiting for its photo: urgent work (urgency.py),
         the background jobs in this process wait to start meanwhile (its stand-in photo, 0.2 s of work, took 5 s and
         more beside the far tiles' and the vegetation's, the edge guard holding the car at 130-175 mph, 2026-10-31)."""
         if urgent and base is not None and not base.done():
             with urgencymod.urgent():
-                return self._finish_heightmap_now(anchor, cx, cy, info, t0, base)
-        return self._finish_heightmap_now(anchor, cx, cy, info, t0, base)
+                return self._finish_heightmap_now(anchor, cx, cy, info, t0, base, lane)
+        return self._finish_heightmap_now(anchor, cx, cy, info, t0, base, lane)
 
-    def _finish_heightmap_now(self, anchor, cx, cy, info, t0, base=None):
+    def _finish_heightmap_now(self, anchor, cx, cy, info, t0, base=None, lane=None):
         """The base photo (detail mode; rendered here: the imagery corrections live in this process; base: its
         future from _base_photo, started with the heights), the timings."""
         if base is not None:
@@ -2244,7 +2288,9 @@ class Server:
                 concurrent.futures.wait([base], timeout=BASE_FAST_WAIT_S if self.fast else BASE_WAIT_S)
             quick = None
             if not base.done() and getattr(self, "speed", 0.0) < QUICK_SYNC_MAX_V and self.imagery is not None:
-                quick = self.write_quick_base(anchor, cx, cy)
+                quick = self._quick_elsewhere(anchor, cx, cy, lane) if lane == LANE_REQUEST else None
+                if not quick:
+                    quick = self.write_quick_base(anchor, cx, cy)
                 info["stages"]["baseQuick"] = time.perf_counter() - t1
                 if not quick and not self.fast:
                     base.result()       # (no stand-in to show: slower, the photo is waited for, as before)
@@ -2357,6 +2403,40 @@ class Server:
     def quick_base_name(self, key):
         return self.hm_name(key)[:-4] + "_base_q.png"
 
+    def _quick_elsewhere(self, anchor, cx, cy, lane):
+        """write_quick_base in the block's own lane process (idle once its heights are built: blockworker.base_photo
+        quick), at FAST_BASE_V and over or when no recent full photo overlaps it (those pasted in need this process;
+        at speed every block overlaps the last and the stand-in here took 5-7 s): the file name, or None
+        (then here). Its road paint, 0.1 s alone, took 3.7 s here at 185 mph beside the rest (2026-10-31)."""
+        if not URGENT_ELSEWHERE or not self.block_pools or self.imagery is None:
+            return None
+        size = self.layout.block * heightmap.SQUARE
+        with self.base_lock:
+            recent = list(self.recent_full)
+        if getattr(self, "speed", 0.0) < FAST_BASE_V and any(
+                aid == anchor.id and abs(ocx - cx) < size and abs(ocy - cy) < size for aid, ocx, ocy, _ in recent):
+            return None                 # (slower: the overlap pasted in here; faster, every block overlaps the last)
+        key = (anchor.id, cx, cy)
+        name = self.quick_base_name(key)
+        im = self.imagery
+        tex = {"chain": [s_.name for s_ in im.chain], "tone": self.tone, "leaf_on": im.leaf_on,
+               "season_mode": im.season_mode}
+        t0 = time.perf_counter()
+        try:
+            got = self.block_pools[lane][0].submit(
+                blockworker.base_photo, anchor.lat, anchor.lon, cx - size / 2 - BASE_SHIFT_M,
+                cy - size / 2 - BASE_SHIFT_M, size, QUICK_BASE_PX, tex, False, anchor.zooms[0],
+                os.path.join(self.out_dir, name), (self.user_dir, f"{self.vfs_dir}/{name}", base_ao_vfs(self.base_px),
+                                                   BASE_AO), out_px=self.base_px, quick=True).result()
+        except Exception as e:
+            log.info("quick base photo %s in the block process: %s", key, e)
+            return None
+        if got is None:
+            log.info("quick base photo %s: not in the block process (an imagery tile not on disk)", key)
+            return None
+        log.info("quick base photo %s in the block process in %.2f s", key, time.perf_counter() - t0)
+        return name
+
     def write_quick_base(self, anchor, cx, cy):
         """A block's stand-in photo while its own is drawn: the aerial imagery alone at QUICK_BASE_PX (no roofs, painted
         roads or rock), packed for the game like the photo. A block sent without its photo showed the level's flat
@@ -2371,6 +2451,7 @@ class Server:
             # already painted/loaded terrain instead of new terrain")
             n = self.base_px
             sc = n / size
+            tq = [("start", time.perf_counter())]
             with self.base_lock:
                 recent = list(self.recent_full)
             parts = []                  # (the oldest first: the newer is pasted over it)
@@ -2386,8 +2467,10 @@ class Server:
             if have.all():
                 rgb = np.empty((n, n, 3), np.uint8)
             else:                       # the rest (the new ground at the block's edge): the imagery alone
+                tq.append(("overlap", time.perf_counter()))
                 with (self.deshadow.no_wait() if self.deshadow is not None else contextlib.nullcontext()):
                     small, used = self.imagery.render(anchor.frame, x0, y0, size, QUICK_BASE_PX, set())
+                tq.append(("imagery", time.perf_counter()))
                 covered = sum(v for k, v in (used or {}).items() if k != "colormatch")
                 if covered < QUICK_MIN_COVER * QUICK_BASE_PX * QUICK_BASE_PX and have.mean() < 0.5:
                     # its imagery not here yet and little of it shown before: the renderer's dirt-brown fill over the
@@ -2397,22 +2480,30 @@ class Server:
                 if roadsmod.ROADS_IN_GROUND:    # the carriageways painted in at its own size (cached roads only)
                     try:
                         small = surfacemod.paint_square(small, anchor.frame, x0, y0, size, self.surface,
-                                                        self.road_widths)
+                                                        self.road_widths, simple=True)
                     except Exception as e:
                         log.debug("quick base photo %s: roads: %s", key, e)
+                tq.append(("roads", time.perf_counter()))
                 # (at the photo's own size: the engine refuses another, "dont have required size of 4096-4096")
                 rgb = np.array(surfacemod.enlarge(small, n), np.uint8)
+                tq.append(("enlarge", time.perf_counter()))
             # plain slices, not masks: masked copies took 0.9 s of a 4096² stand-in's 1.4 s, and at 230 mph (a block
             # every 1.2 s) the stand-ins fell behind and the flat base showed between them (the user, 2026-10-30)
             for i0, i1, j0, j1, dy, dx, orgb in parts:
                 rgb[i0:i1, j0:j1] = orgb[i0 + dy:i1 + dy, j0 + dx:j1 + dx]
+            tq.append(("paste", time.perf_counter()))
             name = self.quick_base_name(key)
             path = os.path.join(self.out_dir, name)
             tmp = staging.tmp_for(path)
             with open(tmp, "wb") as f:
                 f.write(terraincache.stored_png(rgb))
             staging.replace(tmp, path)
+            tq.append(("png", time.perf_counter()))
             terraincache.base_entry(self.user_dir, f"{self.vfs_dir}/{name}", base_ao_vfs(self.base_px), rgb, BASE_AO)
+            tq.append(("cache", time.perf_counter()))
+            if tq[-1][1] - tq[0][1] > 1.0:
+                log.info("quick base photo %s in %.2f s: %s (%d px)", key, tq[-1][1] - tq[0][1],
+                         " ".join(f"{k} {b - a:.2f}" for (_, a), (k, b) in zip(tq, tq[1:])), n)
             return name
         except Exception as e:      # the flat base then, as before
             log.info("quick base photo %s: %s", key, e)
@@ -3457,6 +3548,7 @@ TELEPORT_PAUSE_MAX_S = 120.0  # ... at most this long (the mod may never commit 
 BOOST_MOVE_MS = 3.0         # the loading boost ends when the player moves faster than this (m/s) ...
 BOOST_MAX_S = 120.0         # ... or this long after the teleport
 BOOST_GRACE_S = 5.0         # (the car dropped into place moves a little at first)
+BOOST_FULL_MAX_S = 300.0    # full priority loading (Server.load_boost's teleportPriority) ends this long after at most
 
 ANCHOR_TILE_FILES = ("roads", "road", "walks", "walkcol", "deck", "bld", "bldcol", "bldfar", "wire", "veg", "navgraph")
 
@@ -4479,6 +4571,11 @@ class Connection:
         # under TELEPORT_PAUSE_M away waited 26 s for a graded first block in Manhattan, 2026-10-25)
         declared = msg.get("purpose") == "teleport"
         teleport = old is None or declared
+        if old is None and not self.s.boost_on:
+            # (joining the world: full priority loading as after a teleport, when the player chose it; the user,
+            # 2026-10-31: "setting should trigger on joining the world too")
+            self.boost_t0 = time.monotonic()
+            self.s.load_boost(True, "joining", full_only=True)
         if old is not None:
             la, lo, _ = old.frame.enu_to_geodetic(*self.focus, 0.0)
             if declared or geodesy.haversine_m(float(la), float(lo), lat, lon) > TELEPORT_PAUSE_M:
@@ -4725,6 +4822,10 @@ class Connection:
                 let_go.append(int(n))
         self.s.slots_let_go(let_go)
 
+    def far_loading(self):
+        """Is the far field round the active anchor still being built or sent (far_done not owed yet)?"""
+        return bool(self.dirty or self.inflight)
+
     def on_pose(self, msg):
         self.slots_gone(msg.get("slotsGone"))
         held = msg.get("held")
@@ -4767,7 +4868,14 @@ class Connection:
                 # player drove off on bare ground, its road tiles minutes late, GitHub #412)
                 done, want = self.roads.progress()
                 moving = done >= want
-            if moving or since > BOOST_MAX_S:
+            if self.s.boost_full:
+                # (full priority: until the far field and the roads round the car are done, moving or not)
+                done, want = self.roads.progress() if self.s.mapdata is not None else (1, 1)
+                # (its own far field done since the teleport: right after it nothing was loading yet, ended in 0.7 s)
+                loaded = getattr(self, "far_done_at", 0.0) > getattr(self, "boost_t0", 0.0) and not self.far_loading()
+                if (loaded and done >= want) or since > BOOST_FULL_MAX_S:
+                    self.s.load_boost(False, "loaded" if since <= BOOST_FULL_MAX_S else "timeout")
+            elif moving or since > BOOST_MAX_S:
                 self.s.load_boost(False, "moving" if moving else "timeout")
         if isinstance(msg.get("cam"), dict):
             self.cam, self.cam_aid = msg["cam"], aid
@@ -5533,7 +5641,9 @@ class Connection:
                 self.dirty = False
                 n = sum(1 for k in self.desired if self.ck(k) in self.shown)
                 self.send({"type": "far_done", "anchorId": anchor.id, "count": n})
-                self.s.load_boost(False, "far field done")
+                self.far_done_at = time.monotonic()
+                if not self.s.boost_full:       # (full priority: the roads too, on_pose)
+                    self.s.load_boost(False, "far field done")
                 self.status(f"Far field ready ({n} tiles)")
                 bs = sorted(self.s.build_stats)
                 log.info("anchor %d far field done: %d tiles (%d sent, %d swaps in %.2f s; build median %.1f ms)",

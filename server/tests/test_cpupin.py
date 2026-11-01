@@ -31,6 +31,29 @@ class BoostTest(unittest.TestCase):
             self.assertEqual(cpupin.boosted({6, 7, 14, 15}, {0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13}),
                              {3, 4, 5, 6, 7, 11, 12, 13, 14, 15})
 
+    def test_full_split_after_a_teleport(self):
+        # the settings page's teleportPriority: the server on every CPU, the game on its first two cores alone
+        with mock.patch.object(cpupin, "_siblings", side_effect=fake_siblings):
+            server, game = cpupin.split()
+            full = cpupin.full_split(server, game)
+        self.assertEqual(full[0], server | game)
+        self.assertEqual(full[1], {0, 1, 8, 9})
+        with mock.patch.object(cpupin, "_siblings", side_effect=fake_siblings):
+            self.assertIsNone(cpupin.full_split({6, 14}, {0, 1, 8, 9}), "no cores to take from a two-core game")
+        self.assertIsNone(cpupin.full_split(None, {1, 2}))
+
+    def test_teleport_priority_setting_read(self):
+        import json
+        import tempfile
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "settings"))
+        with open(os.path.join(d, "settings", "beamngEarth.json"), "w") as f:
+            json.dump({"teleportPriority": True}, f)
+        self.assertTrue(cpupin.player_settings(d).get("teleport_full"))
+        with open(os.path.join(d, "settings", "beamngEarth.json"), "w") as f:
+            json.dump({"teleportPriority": False}, f)
+        self.assertFalse(cpupin.player_settings(d).get("teleport_full"))
+
     def test_nothing_to_lend(self):
         self.assertIsNone(cpupin.boosted(None, {1, 2}))
         self.assertIsNone(cpupin.boosted({1}, set()))

@@ -96,6 +96,7 @@ export const settingsSchema = [
       { id: "serverPriority", type: "select", default: "low", name: "World server priority", desc: "Low (the default): the game always comes first, the map can take longer to load. Normal: the app gets its fair share, so the map loads faster on a busy CPU, at a few frames per second.",
         note: "Takes effect the next time you start BeamNG.Earth.",
         options: [ { label: "Low", value: "low" }, { label: "Normal", value: "normal" } ] },
+      { id: "teleportPriority", type: "bool", default: false, name: "Full priority loading", desc: "When you join the world and after a teleport, the app builds the place on every CPU core and the game keeps only two, until the place around you has finished loading. The new place loads much faster; the game runs at a lower frame rate meanwhile. Takes effect at your next teleport or the next time you join." },
     ],
   },
   {

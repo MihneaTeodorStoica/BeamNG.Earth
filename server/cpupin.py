@@ -88,6 +88,8 @@ def player_settings(user_dir):
         out["cores"] = int(cores)
     if str(d.get("serverPriority", "low")) == "normal":
         out["priority"] = "normal"
+    if d.get("teleportPriority") is True:
+        out["teleport_full"] = True
     return out
 
 
@@ -165,6 +167,22 @@ def pin_game(cpus):
 # server's processes may also run on half of the game's cores (the last ones); they keep their idle scheduling, so a
 # game thread that wants a CPU still gets it. Then they go back to their own cores.
 LEND_SHARE = 0.5            # of the game's physical cores
+
+
+FULL_GAME_CORES = 2         # physical cores the game keeps while the server loads at full priority (full_split)
+
+
+def full_split(server_cpus, game_cpus, keep=FULL_GAME_CORES):
+    """(server CPUs, game CPUs) while the server loads at full priority after a teleport (the settings page's
+    teleportPriority; the user, 2026-10-31: "after teleport the server takes full priority until it can finish
+    loading"): the server on every CPU of the split, the game on its first `keep` physical cores (with their
+    hyperthread siblings) alone; None when there is no split or too few cores to leave the game."""
+    if not server_cpus or not game_cpus:
+        return None
+    cores = [cpus for _, cpus in _siblings(sorted(set(game_cpus)))]
+    if len(cores) <= keep:
+        return None
+    return set(server_cpus) | set(game_cpus), {c for cpus in cores[:keep] for c in cpus}
 
 
 def boosted(server_cpus, game_cpus, share=LEND_SHARE):
