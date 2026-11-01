@@ -1,12 +1,16 @@
 """geocode: the map's address search (Photon) request and response handling."""
+import json
+import os
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import geocode  # noqa: E402
+import netfetch  # noqa: E402
 
 
 class FakeNet:
@@ -71,6 +75,77 @@ class GeocodeTest(unittest.TestCase):
             def get(self, *a, **k):
                 raise AssertionError("no request for a short query")
         self.assertEqual(geocode.search("ab", net=Boom()), [])
+
+    def test_default_urls_keep_their_keys(self):
+        with patch.dict(os.environ):
+            os.environ.pop(geocode.PHOTON_BASE_ENV, None)
+            self.assertEqual(
+                geocode.url(" Koeln ", 50.9375, 6.9603, lang="de"),
+                "https://photon.komoot.io/api/?q=Koeln&limit=7&lang=de&lat=50.9375&lon=6.9603")
+            self.assertEqual(
+                geocode.reverse_url(46.0207, 7.7491, lang="de"),
+                "https://photon.komoot.io/reverse?lat=46.02&lon=7.75&lang=de&limit=1")
+
+    def test_custom_base_path_used_for_search_and_reverse(self):
+        with patch.dict(os.environ, {geocode.PHOTON_BASE_ENV: "http://127.0.0.1:2322/geo/v1%20blue/"}):
+            net = FakeNet()
+            geocode.search("Koeln", 50.9375, 6.9603, net=net, country="DE")
+            self.assertEqual(
+                net.urls[0], "http://127.0.0.1:2322/geo/v1%20blue/api?"
+                "q=Koeln&limit=7&lang=de&lat=50.9375&lon=6.9603")
+            self.assertIsNone(net.lane)
+            geocode.reverse(46.0207, 7.7491, net=net, country="CH")
+            self.assertEqual(
+                net.urls[1], "http://127.0.0.1:2322/geo/v1%20blue/reverse?"
+                "lat=46.02&lon=7.75&lang=de&limit=1")
+            self.assertEqual(net.lane, "reverse")
+
+    def test_base_variants_and_invalid_settings(self):
+        for base, expected in (
+            ("http://[::1]:2322", "http://[::1]:2322/api"),
+            ("https://example.org/a%2Fb///", "https://example.org/a%2Fb/api"),
+        ):
+            with self.subTest(base=base), patch.dict(os.environ, {geocode.PHOTON_BASE_ENV: base}):
+                self.assertEqual(geocode.url("abc").split("?", 1)[0], expected)
+        for base in ("", "   ", "example.org", "ftp://example.org/a", "http://[::1",
+                     "http://example.org:notaport", "https://user:very-secret@example.org/a",
+                     "https://example.org/a?key=very-secret", "https://example.org/a#very-secret"):
+            with self.subTest(base=base), patch.dict(os.environ, {geocode.PHOTON_BASE_ENV: base}):
+                for make in (lambda: geocode.url("abc"), lambda: geocode.reverse_url(1, 2)):
+                    with self.assertRaises(geocode.InvalidEndpoint) as caught:
+                        make()
+                    self.assertNotIn("very-secret", str(caught.exception))
+                    self.assertNotIn("very-secret", geocode.error_text(caught.exception))
+
+    def test_error_classification_never_exposes_url_or_exception(self):
+        secret = "very-secret"
+        detail = f"https://user:{secret}@example.org/path?token={secret}"
+        cases = (
+            (netfetch.FetchFailed(detail, status=403),
+             "Geocoding service refused the request (HTTP 403)."),
+            (netfetch.FetchFailed(detail, status=401),
+             "Geocoding service refused the request (HTTP 401)."),
+            (netfetch.RateLimited(detail, status=429, retry_after=2.1),
+             "Geocoding service rate limited the request (HTTP 429). Try again in 3 s."),
+            (netfetch.RateLimited(detail, status=503, retry_after=12),
+             "Geocoding service returned HTTP 503. Try again in 12 s."),
+            (netfetch.RateLimited(detail),
+             "Geocoding request temporarily limited by network policy."),
+            (netfetch.Offline(detail), "Geocoding unavailable: offline mode."),
+            (netfetch.HostUnavailable(detail, retry_after=1),
+             "Geocoding service temporarily unavailable (network circuit open). Try again in 1 s."),
+            (netfetch.BudgetExceeded(detail), "Geocoding network request budget reached."),
+            (netfetch.PolicyDenied(detail), "Geocoding request denied by network policy."),
+            (netfetch.FetchFailed(detail), "Geocoding service could not be reached (network error)."),
+            (netfetch.NotFound(detail, status=404), "Geocoding service returned HTTP 404."),
+            (netfetch.BadResponse(detail, status=200), "Geocoding service returned an invalid response."),
+            (json.JSONDecodeError(detail, "not json", 0), "Geocoding service returned an invalid response."),
+            (RuntimeError(detail), "Geocoding failed (unexpected error)."),
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__, status=getattr(error, "status", None)):
+                self.assertEqual(geocode.error_text(error), expected)
+                self.assertNotIn(secret, geocode.error_text(error))
 
 
 if __name__ == "__main__":
