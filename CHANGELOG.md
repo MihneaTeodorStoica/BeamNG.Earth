@@ -6,6 +6,21 @@ What changed in each release of BeamNG.Earth, newest first.
 
 - Keep the world map and saved-place search usable with no saved or recent places, including after deleting the
   last saved place. Empty lists from Lua are normalized before map rendering and search consume them (#601).
+- Solve ground junction elevations from mapped connections without joining unrelated bridge/tunnel
+  levels, including curved and clipped source segments.
+- Preserve bridge endpoint constraints, original floor peaks and solved deck heights when spreading
+  terrain-clearance lifts, reducing artificial approach cliffs without flattening genuine hills.
+- Keep contradictory mapped road tunnels covered with continuous collision floors, source-connected
+  approaches and separate surface roads above them; do not invent unmapped metro or tram structures.
+- Trim unambiguous ground-level building intrusions across visible, distant and collision meshes,
+  retaining small buildings and ambiguous, elevated or harbour structures.
+- Use full prop colliders and shared generated-road envelopes, including actual deck depths, to keep
+  roadside furniture and pylons out of carriageways without removing safe fixtures or conductors.
+- Render explicitly mapped tram bridges with narrow concrete decks, embedded rails and collision.
+- Support authorized Photon endpoints through `BNGE_PHOTON_BASE_URL` and show actionable map-search
+  failures even beside matching saved places.
+- Protect all occupied local-player vehicles, including sparse split-screen seats, from AI recycling,
+  pool deactivation and far-car removal.
 
 ## 1.7.3 beta (2026-10-30)
 
