@@ -3167,7 +3167,8 @@ def _path_curve(lines, order, ground_fn, crossings, spans, clear, lift, max_grad
     L = S[-1]
     if L < 1.0 or len(P) < 2:
         return None
-    n = max(int(math.ceil(L / DECK_CURVE_STEP)), 2)
+    # A rotation can put an integral length a few ulps above its metre station.
+    n = max(int(math.ceil(L / DECK_CURVE_STEP - 1e-9)), 2)
     s = np.linspace(0.0, L, n + 1)
     xy = np.c_[np.interp(s, S, P[:, 0]), np.interp(s, S, P[:, 1])]
 
@@ -3203,12 +3204,12 @@ def _path_curve(lines, order, ground_fn, crossings, spans, clear, lift, max_grad
                 continue
             # (upstream's full-headroom corridor, DECK_CLEAR_REACH_M either side, and the curve's 5 cm acceptance
             # taken up front: the corridor came out 4 cm short, test_bridge_clearance)
-            m = np.abs(s - sc) <= max(DECK_ROAD_HALF, DECK_CLEAR_REACH_M if not own else 0.0)
+            m = np.abs(s - sc) <= max(DECK_ROAD_HALF, DECK_CLEAR_REACH_M if not own else 0.0) + 1e-8
             req[m] = np.maximum(req[m], zc + cl + (0.06 if not own else 0.0))
     for k, a0, a1, zmin in spans:
         if k in info:
             x0, x1 = sorted((to_s(k, a0), to_s(k, a1)))
-            m = (s >= x0) & (s <= x1)
+            m = (s >= x0 - 1e-8) & (s <= x1 + 1e-8)
             req[m] = np.maximum(req[m], zmin)
     z = curve_profile(s, g, req, z0, zL, g0, gL, max_grade, lift, cap=junction)
     out = {}
@@ -3448,25 +3449,24 @@ LIFT_END_GRADE = 0.01   # by an abutment the floor rises from the abutment no fa
 
 
 def _lift_smooth(s, z, floor, iters=8):
-    """z (heights at arcs s) raised to at least floor between its ends, the lift run out at LIFT_GRADE and rounded
-    over LIFT_EASE_M, not stepped: clamping each point to the ground left a 0.6-0.9 m step in the last few metres
-    where a deck lands on a bank the DEM shows steep (the Steel and St. Johns bridges' ends: 17-31 % between two deck
-    points). The ends keep their heights; whatever the rounding leaves short is clamped last. Pure."""
+    """z (heights at arcs s) raised to at least floor between its ends. The required *addition* to z runs out at
+    LIFT_GRADE and is rounded over LIFT_EASE_M. Spreading absolute floor heights instead turned a legitimate 5 %
+    uphill deck into a 3 % envelope held metres above its low abutment, then reset that end in one step.
+    The ends keep their heights; whatever the rounding leaves short is clamped last. Pure."""
     s = np.asarray(s, np.float64)
     z = np.array(z, np.float64)
     floor = np.asarray(floor, np.float64)
     if len(z) < 3 or s[-1] <= 0:
         z[1:-1] = np.maximum(z[1:-1], floor[1:-1])
         return z
-    g = np.arange(0.0, s[-1] + 1e-9, 1.0)
-    if g[-1] < s[-1]:
-        g = np.r_[g, s[-1]]
+    # Uniform and end-inclusive: tiny rotation/length roundoff must not add an almost-zero final interval.
+    g = np.linspace(0.0, s[-1], max(1, int(math.ceil(s[-1] - 1e-9))) + 1)
     zg = np.interp(g, s, z)
     # within LIFT_EASE_M / 2 of an abutment the floor is no higher than the abutment allows at LIFT_END_GRADE (a bank
     # the DEM shows over the road's end: the deck lands on the road, not on the bank's top)
     d0, d1 = g, g[-1] - g
-    cap = np.minimum(np.where(d0 < LIFT_EASE_M / 2, z[0] + LIFT_END_GRADE * d0, np.inf),
-                     np.where(d1 < LIFT_EASE_M / 2, z[-1] + LIFT_END_GRADE * d1, np.inf))
+    cap = np.minimum(np.where(d0 < LIFT_EASE_M / 2 - 1e-8, z[0] + LIFT_END_GRADE * d0, np.inf),
+                     np.where(d1 < LIFT_EASE_M / 2 - 1e-8, z[-1] + LIFT_END_GRADE * d1, np.inf))
     fl = np.interp(g, s, floor)
     fg = np.maximum(np.minimum(fl, cap), fl - DECK_CLEAR)     # (never under the ground itself)
     r = int(LIFT_EASE_M // 2)
@@ -3476,14 +3476,13 @@ def _lift_smooth(s, z, floor, iters=8):
         out = np.array(z)
         out[1:-1] = np.maximum(out[1:-1], np.interp(s, g, fg)[1:-1])
         return out
-    want = fg.copy()
+    want = np.maximum(fg - zg, 0.0)
     zz = zg
     for _ in range(iters):
         cone = _tents(g, np.where(inner, want, -np.inf), LIFT_GRADE)
-        tgt = np.maximum(zg, cone)
+        tgt = np.maximum(cone, 0.0)
         ext = np.r_[np.full(r, tgt[0]), tgt, np.full(r, tgt[-1])]
-        zz = np.convolve(ext, np.ones(2 * r + 1) / (2 * r + 1), mode="valid")
-        zz = np.maximum(zz, zg)
+        zz = zg + np.convolve(ext, np.ones(2 * r + 1) / (2 * r + 1), mode="valid")
         zz[0], zz[-1] = zg[0], zg[-1]
         short = np.where(inner, fg - zz, 0.0)
         if short.max() <= 0.01:
