@@ -139,7 +139,7 @@ class SourceConnectorTest(unittest.TestCase):
         f = features([[(-4000, 0), (0, 0), (4000, 0)]], ["primary"], ids=["long"])
         f.rules["connectors"] = rules([(0, "west", 0.0, 0.0), (0, "east", 1.0, 1.0)])
         ring = f.parts(0)[0][0]
-        g = grading.Grader(FRAME, FakeMD(f), lambda la, lo: np.full(np.shape(la), 10.0))
+        g = grading._Planner(FRAME, FakeMD(f), lambda la, lo: np.full(np.shape(la), 10.0))
         clipped = g._near_cell(ring, (-100, -20, 100, 20))
         self.assertTrue(clipped)
         self.assertEqual(grading.junction_nodes(FRAME, f, [("long", PRIMARY, clipped[0])]), [[]])
