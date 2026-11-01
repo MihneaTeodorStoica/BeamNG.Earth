@@ -1508,6 +1508,25 @@ class MountainRoadTest(unittest.TestCase):
         self.assertNotIn("centre", kinds(sp._replace(mountain=True)))
         self.assertIn("edge", kinds(sp._replace(mountain=True)))
 
+    def test_hairpins_widened(self):
+        """Each hairpin's apex found; the road HAIRPIN_WIDEN_M wider there through its tapers, its legs as they were;
+        the grading's pads wider than the road's own core there."""
+        import grading
+        f = features([_zigzag(4)], ["secondary"])
+        sp = roads.road_specs(f)[0]
+        ll = f.lonlat
+        apexes = roads.hairpin_apexes(ll)
+        self.assertEqual(len(apexes), 4)
+        tp = roads.road_tapers(f)[0]
+        ws = roads.taper_widths(sp.width, tp, ll[:, 0], ll[:, 1])
+        self.assertAlmostEqual(float(ws.max()), sp.width + roads.HAIRPIN_WIDEN_M, delta=0.3)
+        self.assertAlmostEqual(float(ws.min()), sp.width, delta=0.01)
+        xy = np.c_[(ll[:, 0] - LON) * M_LON, (ll[:, 1] - LAT) * M_LAT]
+        p = grading._plan(xy, np.zeros(len(xy)), sp)
+        pads = grading.hairpin_pads([("r", p)], [sp], FRAME)
+        self.assertEqual(len(pads), 4)
+        self.assertTrue(all(q.half > p.half + 1.0 for _f, q in pads))
+
     def test_steep_sides_no_verge(self):
         """Graded across a 45-degree hillside: the pass road's fill side falls away within 2 m of its carriageway's
         edge, its cut side is back on the slope past its wall's strip (grading.WALL_FLAT_M); the same road without

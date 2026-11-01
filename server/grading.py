@@ -678,6 +678,39 @@ def snap_junctions(plans, specs):
         plans[j].z = out[off[j]:off[j + 1]].copy()
 
 
+def hairpin_pads(plans, specs, frame):
+    """[(fid, Plan)] of the widened hairpins of the pass roads among plans ([(fid, Plan)], specs alike): per hairpin
+    (roads.hairpin_apexes on the plan's line) a plan along the road within roads.HAIRPIN_SPAN_M of its apex, at its
+    heights, its core the road's width there at about its widest (roads.HAIRPIN_WIDEN_M more), so the ground under the
+    widened turn is graded with it."""
+    out = []
+    for (fid, p), sp in zip(plans, specs):
+        if sp is None or not getattr(sp, "mountain", False) or len(p.xy) < 3:
+            continue
+        xy = np.asarray(p.xy, np.float64)[:, :2]
+        la, lo, _ = frame.enu_to_geodetic(xy[:, 0], xy[:, 1], np.zeros(len(xy)))
+        for alo, ala in roadsmod.hairpin_apexes(np.c_[np.asarray(lo), np.asarray(la)]):
+            e, n, _ = frame.geodetic_to_enu(np.array([ala]), np.array([alo]), np.zeros(1))
+            d = np.hypot(xy[:, 0] - float(np.asarray(e)[0]), xy[:, 1] - float(np.asarray(n)[0]))
+            # (the stretch round the apex alone: the legs above and below pass within metres of it)
+            a = b = int(np.argmin(d))
+            r = roadsmod.HAIRPIN_SPAN_M * 0.7
+            if d[a] > r:
+                continue
+            while a > 0 and d[a - 1] < r:
+                a -= 1
+            while b < len(d) - 1 and d[b + 1] < r:
+                b += 1
+            if b - a < 1:
+                continue
+            w = sp.width + roadsmod.HAIRPIN_WIDEN_M * 0.75
+            q = Plan(xy[a:b + 1].copy(), np.asarray(p.z, np.float64)[a:b + 1].copy(), w / 2 + shoulder(sp),
+                     road_half=w / 2)
+            q.rid, q.max_wall, q.steep = p.rid, p.max_wall, getattr(p, "steep", False)
+            out.append((f"{fid}:hairpin{a}", q))
+    return out
+
+
 def shoulder(spec):
     """m of flat ground beyond the carriageway edge, each side. Like the core width, never from the land
     cover: a road class that gets sidewalks in towns keeps a sidewalk-wide verge everywhere."""
@@ -917,6 +950,13 @@ class _Planner:
                     snap_junctions([p for _f, p in plans], pspecs)
                 except Exception as e:
                     log.debug("grading: junctions after the dips of %s: %s: %s", key, type(e).__name__, e)
+            if plans:
+                try:            # a pass road's widened hairpins (roads.HAIRPIN_*): a wider core round each
+                    pads = hairpin_pads(plans, pspecs, self.frame)
+                    plans.extend(pads)
+                    pclip.extend([True] * len(pads))
+                except Exception as e:      # the road's own core rather than none
+                    log.debug("grading: hairpins of %s: %s: %s", key, type(e).__name__, e)
             if CORNERS_ON and plans:
                 # the rounded corners of curbless junctions (roadcorners.py): the ground under each graded to its roads'
                 # solved heights (trimmed to the cell's box with the roads' plans below)
