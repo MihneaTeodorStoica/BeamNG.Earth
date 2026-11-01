@@ -7982,9 +7982,9 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
     if props is not None and walks is not None:     # street lights and utility poles (furniture.py)
         # (the speed-limit signs are the sign tiles' since 2026-10-28: speedsigns.py)
         import furniture
-        decks = [(np.asarray(ch["n"], np.float64), ch["w"] / 2) for ch in chunks if ch.get("deck")]
+        decks = [(np.asarray(ch["n"], np.float64), ch["w"] / 2) for ch in decks_near]
         props.extend(furniture.place(roads, walks, own_box, wires=wires, town=bool(town), left_hand=left_hand,
-                                     decks=decks, signals=signals, buried=buried, region=lamp_region,
+                                     decks=decks, signals=signals, buried=buried, region=lamp_region, ground=ground,
                                      lighting={fid: str(f.attrs["osm_lit"][i]).strip().lower()
                                                for fid, (f, i, _sp) in seen.items() if "osm_lit" in f.attrs}))
     aisles = {fid for fid, (f, i, sp) in seen.items()
