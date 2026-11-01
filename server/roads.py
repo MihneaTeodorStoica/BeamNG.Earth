@@ -6575,7 +6575,7 @@ class ChainView:
 
     heights = property(lambda self: self._merged("heights"))
     mouths = property(lambda self: self._merged("mouths"))
-
+    approach_owners = property(lambda self: self._merged("approach_owners"))
     def _sub(self, method, fid, default):
         for st in self._stores():
             with st.lock:
@@ -6771,7 +6771,8 @@ def block_tunnel_holes(tunnels, cell_fn, frame, keep, cx, cy, square):
     mask = tunnel_hole_mask(parts, u, cx, cy, square, getattr(tunnels, "heights", None),
                             getattr(tunnels, "mouths", None))
     if mask is not None and mask.any():
-        mask = spare_carriageways(mask, parts, cells, frame, cx, cy, square)
+        owners = getattr(tunnels, "approach_owners", None)
+        mask = spare_carriageways(mask, parts, cells, frame, cx, cy, square, owners)
     return mask
 
 
@@ -6779,12 +6780,18 @@ HOLE_ROAD_MARGIN = 0.3      # m past another road's carriageway no tunnel hole i
 HOLE_JOIN_M = 3.0           # m: a road with an end this near a tunnel part's end is its approach (its mouth cut)
 
 
-def spare_carriageways(mask, parts, cells, frame, cx, cy, square):
+def spare_carriageways(mask, parts, cells, frame, cx, cy, square, approach_owners=None):
     """mask with the hole samples inside the carriageway of a ground road that is not the tunnel's (another feature, not
     an approach joined at a mouth) filled again: a portal's opening reaching into a road beside or over it left a hole in
     its lanes (GitHub #450, the A-7 near Málaga, a 2 m drop at the edge of a carriageway beside an underpass's mouth)."""
     import fast
-    own = {str(p[0]).split("#")[0] for p in parts}
+    # Profile IDs carry both the source-part suffix and the covered/open section suffix.
+    # Comparing "source.0" with the map's "source" restored our own approach's terrain
+    # cells inside its portal, turning the floor-to-roof lattice edge into a collider.
+    own = {str(p[0]).split("#")[0].rsplit(".", 1)[0] for p in parts} | {str(p[0]).split("#")[0] for p in parts}
+    if approach_owners:
+        for owners in approach_owners.values():
+            own.update(owners)
     ends = np.array([np.asarray(p[2], np.float64)[k, :2] for p in parts for k in (0, -1) if len(p[2])], np.float64)
     others = []
     for feats in cells:
