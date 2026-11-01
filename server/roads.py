@@ -3770,6 +3770,25 @@ TUNNEL_ROAD_REACH_M = 15.0
 # straight extrapolation into an unrelated street. The cosine has zero grade at both ends.
 TUNNEL_APPROACH_GRADE = 0.08
 TUNNEL_APPROACH_M = TUNNEL_COVER * math.pi / (2 * TUNNEL_APPROACH_GRADE)
+TUNNEL_APPROACH_CONTEXT_M = (TUNNEL_APPROACH_M + TUNNEL_ROAD_REACH_M +
+                             (20.0 + TUNNEL_ROAD_CLEAR_M) / TUNNEL_ROAD_MIN_SIN)
+
+
+def _inferred_cover(kinds, mapped):
+    """Keep a newly inferred bore's adjoining roof one full-height section, including road reach."""
+    kinds = np.array(kinds, np.int64)
+    i = 0
+    while i < len(kinds):
+        if not kinds[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(kinds) and kinds[j]:
+            j += 1
+        if np.any(mapped[i:j]):
+            kinds[i:j] = 2
+        i = j
+    return kinds
 
 
 def mapped_tunnel_floor(s, floor, kinds, mapped, crossings=()):
@@ -5635,7 +5654,7 @@ class TunnelProfiles(BridgeProfiles):
             e, n = mapgeom.enu_xy(feats, self.frame, ring)
             length = float(np.hypot(*np.diff(np.c_[e, n], axis=0).T).sum())
             a, b = bores[bi]
-            pad = TUNNEL_APPROACH_M / max(length, 1e-9)
+            pad = TUNNEL_APPROACH_CONTEXT_M / max(length, 1e-9)
             prev = max((y for x, y, _ in ranges if y <= a + 1e-9 and x < a), default=0.0)
             nxt = min((x for x, y, _ in ranges if x >= b - 1e-9 and y > b), default=1.0)
             lo, hi = max(prev, a - pad), min(nxt, b + pad)
@@ -5653,7 +5672,7 @@ class TunnelProfiles(BridgeProfiles):
                 ee, nn = mapgeom.enu_xy(feats, self.frame, bore_ll)
                 end = np.array([ee[0 if at_start else -1], nn[0 if at_start else -1]])
                 reach = float(np.hypot(*(xy[0 if at_start else -1] - end)))
-                need = max(0.0, TUNNEL_APPROACH_M - reach)
+                need = max(0.0, TUNNEL_APPROACH_CONTEXT_M - reach)
                 for _ in range(4):
                     if need <= 1e-6:
                         break
@@ -5875,8 +5894,18 @@ class TunnelProfiles(BridgeProfiles):
                     for _pi, arc, _point in _crossings([xy], [ln]):
                         reach = (self._hw[gk] + TUNNEL_ROAD_CLEAR_M) / TUNNEL_ROAD_MIN_SIN
                         crossings.append((arc - reach, arc + reach))
+            kinds = self._cover_roads(xy, s, kinds, ground)
             old_floor = floor
             floor, kinds = mapped_tunnel_floor(s, floor, kinds, mapped, crossings)
+            if np.any(old_floor - floor > 1e-6):
+                # Moving a portal to clear a surface carriageway moves the underground
+                # floor constraint with it. Growing only the roof exposed it above Perth's
+                # eastern road and left terrain triangles inside the covered tube.
+                kinds = self._cover_roads(xy, s, kinds, ground)
+                kinds = _inferred_cover(kinds, mapped & (old_floor - floor > 1e-6))
+                grown_floor, _ = mapped_tunnel_floor(s, old_floor, np.zeros(len(s), np.int64),
+                                                     kinds == 2, crossings)
+                floor = np.minimum(floor, grown_floor)
             for i, reverse in order:
                 off, _, size = maps[i]
                 sl = slice(off, off + size)
@@ -5903,8 +5932,10 @@ class TunnelProfiles(BridgeProfiles):
                             continue
                         g, floor, kinds = out[comp[i]]
                         mapped = (arc >= lo - 1e-6) & (arc <= hi + 1e-6)
+                        kinds = self._cover_roads(lines[i], arc, np.where(mapped, 2, kinds), ground)
+                        kinds = _inferred_cover(kinds, mapped)
                         floor, forced = mapped_tunnel_floor(arc, floor, np.zeros(len(arc), np.int64),
-                                                            mapped, [(lo, hi)])
+                                                            kinds == 2, [(lo, hi)])
                         kinds[mapped] = forced[mapped]
                         out[comp[i]] = (g, floor, kinds)
                         inferred.add(i)
@@ -5927,9 +5958,18 @@ class TunnelProfiles(BridgeProfiles):
                     heights[node] = min(heights[node], float(out[comp[i]][1][j]))
                 indices.append(ix)
                 for a, b, distance in zip(ix[:-1], ix[1:], np.hypot(*np.diff(ln, axis=0).T)):
-                    cost = float(distance) * TUNNEL_APPROACH_GRADE
-                    graph[a].append((b, cost))
-                    graph[b].append((a, cost))
+                    graph[a].append((b, float(distance)))
+                    graph[b].append((a, float(distance)))
+            grade = TUNNEL_APPROACH_GRADE
+            for key, edges in by_end.items():
+                if len(edges) != 1:
+                    continue
+                pin = nodes[key]
+                distance = _dijkstra(graph, {pin: 0.0})
+                on = np.isfinite(distance) & (distance > 1e-6)
+                grade = max(grade, float(np.max((heights[pin] - np.asarray(heights)[on]) / distance[on],
+                                                initial=grade)))
+            graph = [[(b, distance * grade) for b, distance in row] for row in graph]
             solved = _dijkstra(graph, dict(enumerate(heights)))
             for i, ix in enumerate(indices):
                 g, _floor, kinds = out[comp[i]]
@@ -5959,7 +5999,6 @@ class TunnelProfiles(BridgeProfiles):
                 continue
             s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
             g, floor, kinds = profiles[k]
-            kinds = self._cover_roads(xy, s, kinds, ground)
             secs, i = [], 0
             while i < len(kinds):
                 j = i
