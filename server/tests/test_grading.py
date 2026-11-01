@@ -435,6 +435,10 @@ class GraderTest(unittest.TestCase):
         self.assertEqual(grading.clip_polyline(np.array([[200.0, 0], [300, 0]]), (0, 0, 10, 10)), [])
         two = grading.clip_polyline(np.array([[-5.0, 5], [15, 5], [15, 7], [-5, 7]]), (0, 0, 10, 10))
         self.assertEqual(len(two), 2)
+        with_stations = np.array([[-5.0, 5, 0], [15, 5, 1], [15, 7, 2], [-5, 7, 3]])
+        pieces = grading.clip_polyline(with_stations, (0, 0, 10, 10))
+        np.testing.assert_allclose(pieces[0], [[0, 5, 0.25], [10, 5, 0.75]])
+        np.testing.assert_allclose(pieces[1], [[10, 7, 2.25], [0, 7, 2.75]])
 
 
 class ChainTest(unittest.TestCase):
