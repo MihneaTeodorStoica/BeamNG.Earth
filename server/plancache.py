@@ -106,6 +106,7 @@ class PlanCache:
         for m, xy, z in zip(meta["plans"], lists["p"], lists["z"]):
             pl = Plan(xy, z, m["half"], tuple(m["abut"]), next(cuts) if m["cut"] else None, m["road_half"])
             pl.rid, pl.max_wall = m["rid"], m["max_wall"]
+            pl.steep = bool(m.get("steep", False))
             pl.bank = next(banks) if m.get("bank") else None
             plans.append((m["fid"], pl))
         keeps = list(zip(lists["k"], meta["keeps"]))
@@ -148,7 +149,7 @@ class PlanCache:
         nothing they read failed or was missing, Grader._plan_cell)."""
         meta = {"plans": [{"fid": fid, "half": p.half, "abut": list(p.abut), "road_half": p.road_half,
                            "rid": int(p.rid), "max_wall": float(p.max_wall), "cut": p.cut is not None,
-                           "bank": getattr(p, "bank", None) is not None}
+                           "bank": getattr(p, "bank", None) is not None, "steep": bool(getattr(p, "steep", False))}
                           for fid, p in plans],
                 "keeps": [float(hw) for _xy, hw in keeps], "covers": [float(w) for _xy, w in covers],
                 "opens": [{k: (v.item() if hasattr(v, "item") else v) for k, v in sp._asdict().items()}

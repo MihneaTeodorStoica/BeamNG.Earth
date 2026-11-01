@@ -1406,6 +1406,20 @@ class RetainingWallTest(unittest.TestCase):
         bank = self._walls(lambda n: np.clip((n - edge + 1.0) / 3.0, 0.0, 1.0) * 3.0)
         self.assertFalse(bank, "a natural bank: no wall")
 
+    def test_mountain_road_parapet_from_a_smaller_drop(self):
+        """Ground falling 1.5 m within 2 m of the edge: a pass road gets its parapet (PARAPET_DROP_MOUNTAIN_M), a
+        rural secondary without the flag none (PARAPET_DROP_M)."""
+        pts = np.c_[np.arange(0.0, 201.0, 5.0), np.zeros(41), np.full(41, 10.0)]
+
+        def elev(la, lo):
+            _e, n, _ = FRAME.geodetic_to_enu(np.asarray(la), np.asarray(lo), np.zeros(np.shape(la)))
+            return 10.0 - np.clip((-np.asarray(n) - 3.5) / 1.5, 0.0, 1.0) * 1.5     # (down to the south)
+        sp = roads.Spec(6.0, "paved", False, "secondary", False)
+        got = lambda spec: [w for w in roads.retaining_walls(FRAME, [("r", spec, pts, LON)], elev,  # noqa: E731
+                                                             (0.0, -128.0, 256.0, 128.0)) if w.get("parapet")]
+        self.assertTrue(got(sp._replace(mountain=True)))
+        self.assertFalse(got(sp))
+
 
 class BatchedHelpersTest(unittest.TestCase):
     """The blockers' segments made in one go (2026-10-25): the same arrays as the line-by-line loop they replace."""
@@ -1433,3 +1447,70 @@ class BatchedHelpersTest(unittest.TestCase):
             for got, w in zip(roads._blocker_segments(blockers), want):
                 np.testing.assert_array_equal(got, w)
                 self.assertEqual(got.dtype, w.dtype)
+
+
+def _zigzag(turns, leg=120.0, r=8.0, step=2.0):
+    """A switchback road: legs of `leg` m east and west joined by `turns` hairpins of radius r (east m, north m)."""
+    pts, y, d = [], 0.0, 1.0
+    for k in range(turns + 1):
+        x0, x1 = (0.0, leg) if d > 0 else (leg, 0.0)
+        for x in np.arange(x0, x1, step * d):
+            pts.append((x, y))
+        if k == turns:
+            pts.append((x1, y))
+            break
+        for a in np.linspace(-np.pi / 2, np.pi / 2, 13):         # a half circle up to the next leg
+            pts.append((x1 + d * r * np.cos(a), y + r + r * np.sin(a)))
+        y += 2 * r
+        d = -d
+    return pts
+
+
+class MountainRoadTest(unittest.TestCase):
+    """Mountain pass roads (roads._mountain_roads; the Stelvio, 2026-10-31): a rural road with switchbacks is narrow,
+    without a centre line, and graded with no verge and steep sides."""
+
+    def test_switchbacks_counted(self):
+        for n in (0, 1, 3, 5):
+            ll = np.array([(LON + e / M_LON, LAT + n_ / M_LAT) for e, n_ in _zigzag(n)])
+            self.assertEqual(roads.switchbacks(ll), n)
+
+    def test_pass_road_narrow_others_not(self):
+        f = features([_zigzag(4), _zigzag(2), _zigzag(4), _zigzag(4)],
+                     ["secondary", "secondary", "primary", "tertiary"], widths=[(3, 7.5)])
+        sp = roads.road_specs(f)
+        self.assertTrue(sp[0].mountain)
+        self.assertEqual(sp[0].width, roads.MOUNTAIN_ROAD_M)
+        self.assertFalse(sp[1].mountain, "two switchbacks: not a pass road")
+        self.assertFalse(sp[2].mountain, "a primary keeps its width")
+        self.assertFalse(sp[3].mountain, "a mapped width stands")
+        self.assertEqual(sp[3].width, 7.5)
+
+    def test_no_centre_line(self):
+        line = np.array([(0.0, 0.0, 0.0), (100.0, 0.0, 0.0)])
+        kinds = lambda sp: {look.get("kind") for look, _w, _p in roads.extras(sp, line, LON, country="IT")}  # noqa: E731
+        sp = roads.Spec(6.0, "paved", False, "secondary", False)
+        self.assertIn("centre", kinds(sp))
+        self.assertNotIn("centre", kinds(sp._replace(mountain=True)))
+        self.assertIn("edge", kinds(sp._replace(mountain=True)))
+
+    def test_steep_sides_no_verge(self):
+        """Graded across a 45-degree hillside: the pass road's fill side falls away within 2 m of its carriageway's
+        edge, its cut side is back on the slope past its wall's strip (grading.WALL_FLAT_M); the same road without
+        the flag holds a wide bench."""
+        import grading
+        sp = roads.Spec(6.0, "paved", False, "secondary", False, mountain=True)
+        xy = np.c_[np.arange(0.0, 201.0, 2.0), np.zeros(101)]
+        def side(spec):
+            p = grading._plan(xy, np.zeros(len(xy)), spec)
+            ys = np.arange(-14.0, 14.1, 1.0)
+            px = np.full(len(ys), 100.0)
+            return ys, grading.grade_points(px, ys, ys.copy(), [p])     # (the hillside: z = y)
+        ys, steep = side(sp)
+        _, wide = side(sp._replace(mountain=False))
+        at = lambda z, y: float(z[np.argmin(np.abs(ys - y))])  # noqa: E731
+        self.assertAlmostEqual(at(steep, 0.0), 0.0, delta=0.1)
+        self.assertGreater(at(steep, 7.0), 6.0, "the cut is back on the slope behind the wall")
+        self.assertLess(at(steep, -5.0), -3.0, "the fill side falls away")
+        self.assertLess(abs(at(wide, -5.0)), abs(at(steep, -5.0)) - 1.0, "without the flag: a wider bench")
+        self.assertLess(at(wide, 7.0), at(steep, 7.0) - 1.0)
