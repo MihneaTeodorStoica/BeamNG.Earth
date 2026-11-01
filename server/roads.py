@@ -5919,7 +5919,9 @@ class TunnelProfiles(BridgeProfiles):
             s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
             gfn = self._raw_ground if self.raw is not None else self._ground
             g = np.array(gfn(xy), np.float64)
-            g[[0, -1]] = self._ends_ground(xy[[0, -1]])
+            # Covered/open ownership is a raw-ground/source decision. Feeding already graded
+            # approach endpoints back into this hull moved the planner's portal relative to
+            # the road-tile portal, so its cover mask restored the roof over the open road.
             floor, kinds = tunnel_sections(s, g)
             kinds = portal_cover(kinds, g - floor, pool[comp[order[0][0]]][0])
             mapped = np.zeros(len(xy), bool)
@@ -6021,6 +6023,24 @@ class TunnelProfiles(BridgeProfiles):
             for i, ix in enumerate(indices):
                 g, _floor, kinds = out[comp[i]]
                 out[comp[i]] = (g, solved[ix], kinds)
+        # Match real surface-road end heights only after the layer boundary is fixed. Ease
+        # each free endpoint through its open approach, never change a covered floor or join.
+        for k, ln in zip(comp, lines):
+            g, floor, kinds = out[k]
+            arc = np.r_[0., np.cumsum(np.linalg.norm(np.diff(ln, axis=0), axis=1))]
+            covered = np.flatnonzero(kinds)
+            for at in (0, -1):
+                if kinds[at] or len(by_end[endpoint(ln[at])]) != 1:
+                    continue
+                distance = arc if at == 0 else arc[-1] - arc
+                reach = (arc[covered[0]] if at == 0 else arc[-1] - arc[covered[-1]]) if len(covered) else arc[-1] / 2
+                reach = min(TUNNEL_APPROACH_M, float(reach))
+                if reach <= 1e-6:
+                    continue
+                delta = float(self._ends_ground(ln[[at]])[0] - floor[at])
+                weight = 0.5 * (1 + np.cos(np.pi * np.clip(distance / reach, 0., 1.)))
+                floor = floor + delta * weight * (kinds == 0)
+            out[k] = (g, floor, kinds)
         return out
 
     def _solve(self, comp, pool, ground):
@@ -6738,6 +6758,7 @@ def block_tunnel_holes(tunnels, cell_fn, frame, keep, cx, cy, square):
     half = u.shape[0] * square / 2
     try:
         parts = tunnels.parts(cells, (cx - half, cy - half, cx + half, cy + half))
+        keep["tunnel_open"] = tunnels.open_parts(cells, (cx - half, cy - half, cx + half, cy + half))
     except Exception as e:          # a chain's other cells not at hand (offline): no holes this time
         (log.debug if isinstance(e, OSError) else log.warning)("tunnel holes: %s: %s", type(e).__name__, e)
         return None

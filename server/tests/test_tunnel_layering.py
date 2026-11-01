@@ -110,6 +110,84 @@ class SourceTunnelLayers(unittest.TestCase):
             ix, iy = int(np.floor((x - xs[0]) / 2)), int(np.floor((y - xs[0]) / 2))
             self.assertFalse(holes[iy, ix], "actual Piața Obor surface crossing remains solid")
 
+    def test_surface_endpoint_grading_cannot_move_a_mapped_bore_or_its_roof(self):
+        frame, feats, elev, tp = captured("obor_tunnels")
+        box = (-500.0, -500.0, 500.0, 500.0)
+        reference = tp.parts([feats], box)
+        graded = roads.TunnelProfiles(frame, lambda _key: feats, elev)
+        graded.raw = elev
+        graded.ends = lambda la, lo: elev(la, lo) + 2.0
+        changed = graded.parts([feats], box)
+        self.assertEqual([p[0] for p in reference], [p[0] for p in changed])
+        for first, second in zip(reference, changed):
+            np.testing.assert_allclose(first[2], second[2], atol=1e-8)
+            np.testing.assert_allclose(first[3], second[3], atol=1e-8,
+                                       err_msg="graded approach feedback moved the covered layer")
+
+    def test_obor_portals_have_colliding_open_floor_without_roof_lattice_wedges(self):
+        import cdae
+        import finepatch
+        import heightmap
+        import tempfile
+        frame, feats, elev, tp = captured("obor_tunnels")
+        box = (-500.0, -500.0, 500.0, 500.0)
+        closed, opened = tp.parts([feats], box), tp.open_parts([feats], box)
+        for fine_on in (False, True):
+            for fid, _sp, xy, z, _lon in opened:
+                mouths = [np.asarray(p[2])[at] for p in closed if p[0].split("#")[0] == fid.split("#")[0]
+                          for at, mouth in zip((0, -1), tp.mouth(p[0])) if mouth]
+                for end in (0, -1):
+                    if not any(np.linalg.norm(xy[end] - p) < 1e-5 for p in mouths):
+                        continue
+                    with self.subTest(fid=fid, end=end, fine=fine_on):
+                        size = 64
+                        cx, cy = np.round(np.asarray(xy)[end] / 2) * 2
+                        xs, ys = heightmap.sample_coords(cx, cy, size)
+                        xx, yy = np.meshgrid(xs, ys)
+                        la, lo, _ = frame.enu_to_geodetic(xx, yy, np.zeros(xx.shape))
+                        # Actual captured DEM is still at roof height here: the floor
+                        # consumer must not pin its corners to that upper terrain layer.
+                        u = heightmap.surface_u(frame, elev, xs, ys)
+                        keep = {"u": u.copy(), "lat": la, "lon": lo}
+                        holes = roads.block_tunnel_holes(tp, lambda _key: feats, frame, keep, cx, cy, 2.0)
+                        idx = np.zeros(u.shape, np.uint8)
+                        if holes is not None:
+                            idx[holes] = heightmap.TER_HOLE
+                        info, meshes = {}, []
+                        with tempfile.TemporaryDirectory() as directory, mock.patch.object(finepatch, "FINE_ON", fine_on):
+                            finepatch.apply(frame, elev, elev, keep, cx, cy, size, directory, "portal", 1, idx, info)
+                            self.assertIn("fine", info, "portal collision fill is mandatory even with fine ground off")
+                            for part in info["fine"]["parts"]:
+                                if not part.get("collide", True):
+                                    continue
+                                shape = cdae.read(str(Path(directory) / part["shape"]))
+                                for mesh in shape["meshes"]:
+                                    if mesh["type"] == 4:
+                                        continue
+                                    arrays = cdae.mesh_arrays(mesh)
+                                    vertices = arrays["verts"] + np.asarray(part["pos"])
+                                    meshes.append(vertices[arrays["indices"].reshape(-1, 3)])
+                        np.testing.assert_array_equal(keep["u"], u, "never lower the covered terrain's height field")
+                        triangles = np.concatenate(meshes)
+                        path = np.c_[xy, z][::-1] if end == -1 else np.c_[xy, z]
+                        for distance in (0.25, 0.75, 1.5, 3., 5., 10., 20.):
+                            p = roads._along(path, distance)
+                            a = triangles[:, 0, :2]
+                            ab, ac = triangles[:, 1, :2] - a, triangles[:, 2, :2] - a
+                            det = ab[:, 0] * ac[:, 1] - ab[:, 1] * ac[:, 0]
+                            valid = np.abs(det) > 1e-8
+                            q = p[:2] - a
+                            b = np.divide(q[:, 0] * ac[:, 1] - q[:, 1] * ac[:, 0], det,
+                                          out=np.zeros(len(det)), where=valid)
+                            c = np.divide(ab[:, 0] * q[:, 1] - ab[:, 1] * q[:, 0], det,
+                                          out=np.zeros(len(det)), where=valid)
+                            on = valid & (b >= -1e-5) & (c >= -1e-5) & (b + c <= 1 + 1e-5)
+                            self.assertTrue(on.any(), f"no collision fill {distance} m outside {fid}")
+                            heights = (triangles[:, 0, 2] + b * (triangles[:, 1, 2] - triangles[:, 0, 2]) +
+                                       c * (triangles[:, 2, 2] - triangles[:, 0, 2]))[on]
+                            np.testing.assert_allclose(heights, p[2], atol=0.06,
+                                                       err_msg=f"roof lattice intrudes {distance} m outside {fid}")
+
     def test_northbridge_both_main_bores_exist_and_source_joint_is_not_a_portal(self):
         _frame, feats, _elev, tp = captured("northbridge_tunnels")
         parts = tp.parts([feats], (-300, -300, 300, 300))
@@ -195,7 +273,9 @@ class SourceJointAndApproach(unittest.TestCase):
         planner._tunnel_owners = {"bore.0": {"own"}}
         own = grading.Plan(np.array([[-20., 0.], [0., 0.], [20., 0.]]), np.full(3, 20.), 3.5)
         surface = grading.Plan(np.array([[0., -20.], [0., 0.], [0., 20.]]), np.full(3, 20.), 3.5)
-        secs = [("bore.0", roads.Spec(7., "paved", False, "primary"), own.xy.copy(), np.array([20., 16., 12.]), 0)]
+        spec = roads.Spec(7., "paved", False, "primary")
+        secs = [("bore.0", spec, own.xy[:2].copy(), np.array([20., 16.]), 0),
+                ("bore.0", spec, own.xy[1:].copy(), np.array([16., 12.]), 2)]
         planner._tunnel_approaches([("own", own), ("surface", surface)], secs)
         np.testing.assert_allclose(own.z, [20, 16, 12])
         np.testing.assert_allclose(surface.z, [20, 20, 20])
