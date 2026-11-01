@@ -651,19 +651,64 @@ def road_rank(spec):
     return r - 1 if cls != base else r
 
 
-def snap_junctions(plans, specs):
-    """A side road's end at a junction takes the height of the road it joins, eased in over
-    JUNCTION_TAPER_M along the side road (each road is smoothed on its own: a side road met the main road up to a metre
-    off, blended over BLEND_R only: a bump at every turn-off). Plans are changed in place, the higher ranks first, so
-    a residential street joining a tertiary road meets it at its already adjusted height. With the coarse easing
-    (BNE_COARSE_EASE=1) also the crossings (GitHub #414, Perm: service roads crossing a primary at a shared node stood
-    as 4-5 m walls across it): where a road runs over a higher-ranked road's carriageway away from its own ends, it takes
-    that road's height there. plans: [Plan], specs: their Specs. In Rust (earthfast.snap_junctions: 15 CPU-s of a
-    teleport's road plans in Python, 2026-10-30)."""
+def junction_nodes(frame, feats, parts):
+    """Mapped (connector ID, ENU point, end 0/1 or -1) occurrences of each planned source part.
+
+    Identity, not proximity, proves a join. Fractions refer to the original feature, never to a clipped
+    piece or a bridge/tunnel's ground remainder. Missing topology deliberately gives no junction.
+    """
+    con = feats.rules.get("connectors")
+    if con is None:
+        return [[] for _ in parts]
+    by_id = {str(fid): i for i, fid in enumerate(feats.ids)}
+    markers = {}
+    for fid, _spec, _line in parts:
+        if fid in markers:
+            continue
+        i = by_id[fid]
+        found = []
+        ranges = roadsmod.level_ranges(feats, i)
+        for part in feats.parts(i):
+            for ring in part:
+                if len(ring) < 2:
+                    continue
+                for r in con.rows(i):
+                    at, name = float(con.start[r]), str(con.value[r])
+                    if not name or not 0.0 <= at <= 1.0 or any(a <= at <= b for a, b, _kind in ranges):
+                        continue
+                    point = ring[0] if at == 0 else ring[-1] if at == 1 else roadsmod.sub_polyline(ring, at, 1.0)[0]
+                    found.append((name, np.asarray(point, np.float64)[:2]))
+        markers[fid] = found
+    out = []
+    for fid, _spec, line in parts:
+        row = []
+        lo, hi = np.min(line[:, :2], axis=0) - 1e-10, np.max(line[:, :2], axis=0) + 1e-10
+        for name, point in markers[fid]:
+            if (point < lo).any() or (point > hi).any():
+                continue
+            end = 0 if np.allclose(point, line[0, :2], rtol=0, atol=1e-10) else \
+                1 if np.allclose(point, line[-1, :2], rtol=0, atol=1e-10) else -1
+            row.append((name, point, end))
+        out.append(row)
+    points = np.array([point for row in out for _name, point, _end in row], np.float64).reshape(-1, 2)
+    if not len(points):
+        return out
+    e, n, _ = frame.geodetic_to_enu(points[:, 1], points[:, 0], 0.0)
+    en = iter(zip(np.asarray(e).tolist(), np.asarray(n).tolist()))
+    return [[(name, next(en), end) for name, _point, end in row] for row in out]
+
+
+def snap_junctions(plans, specs, nodes):
+    """Ease side roads to the road they join, only at shared mapped connector IDs (junction_nodes).
+
+    Higher ranks first; feature IDs break ties deterministically. Equal-class continuations, bridge
+    abutments and changes over JUNCTION_MAX_M stay untouched. With COARSE_EASE_ON, proven interior
+    connectors are eased too; a geometric crossing alone never proves an at-grade junction.
+    """
     if not plans:
         return
     import fast
-    fast.require(115, "the junctions' heights")
+    fast.require(124, "the junctions' topology")
     n = [len(p.xy) for p in plans]
     off = np.concatenate([[0], np.cumsum(n)]).astype(np.int64)
     xy = np.ascontiguousarray(np.concatenate([np.asarray(p.xy, np.float64)[:, :2] for p in plans]).reshape(-1, 2))
@@ -671,9 +716,14 @@ def snap_junctions(plans, specs):
     rank = np.array([road_rank(sp) for sp in specs], np.int64)
     half = np.array([p.road_half for p in plans], np.float64)
     abut = np.array([[bool(p.abut[0]), bool(p.abut[1])] for p in plans], np.uint8).reshape(-1, 2)
-    boxes = np.ascontiguousarray(np.array([q.bbox for q in plans], np.float64).reshape(-1, 4))
-    out, changed = fast._ef.snap_junctions(xy, z, off, rank, half, abut, boxes, JUNCTION_REACH_M, JUNCTION_END_M,
-                                           JUNCTION_TAPER_M, JUNCTION_MAX_M, bool(COARSE_EASE_ON))
+    rid = np.array([p.rid if p.rid >= 0 else 2 ** 40 + j for j, p in enumerate(plans)], np.int64)
+    names = {name: j for j, name in enumerate(sorted({name for row in nodes for name, _xy, _end in row}))}
+    links = np.array([(j, names[name], end) for j, row in enumerate(nodes) for name, _xy, end in row],
+                     np.int64).reshape(-1, 3)
+    points = np.array([point for row in nodes for _name, point, _end in row], np.float64).reshape(-1, 2)
+    out, changed = fast._ef.snap_junctions(xy, z, off, rank, half, abut, rid, links, points,
+                                           JUNCTION_REACH_M, JUNCTION_END_M, JUNCTION_TAPER_M, JUNCTION_MAX_M,
+                                           bool(COARSE_EASE_ON))
     for j in np.flatnonzero(changed):
         plans[j].z = out[off[j]:off[j + 1]].copy()
 
@@ -889,9 +939,10 @@ class _Planner:
                     pspecs.append(part[1])
                     pclip.append(cl)
                     pparts.append((fid, part[1], part[0]))
+            nodes = junction_nodes(self.frame, feats, pparts) if JUNCTION_SNAP_ON else []
             if JUNCTION_SNAP_ON and plans:
                 try:
-                    snap_junctions([p for _f, p in plans], pspecs)
+                    snap_junctions([p for _f, p in plans], pspecs, nodes)
                 except Exception as e:      # blended as before rather than no grading
                     log.debug("grading: junctions of %s: %s: %s", key, type(e).__name__, e)
             if COARSE_EASE_ON and plans:
@@ -914,7 +965,7 @@ class _Planner:
                 # (snapped before them, every alley along Baltimore's Haven Street stood up to 3.5 m over the street
                 # the dip had lowered: a hump at each, the user 2026-10-28)
                 try:
-                    snap_junctions([p for _f, p in plans], pspecs)
+                    snap_junctions([p for _f, p in plans], pspecs, nodes)
                 except Exception as e:
                     log.debug("grading: junctions after the dips of %s: %s: %s", key, type(e).__name__, e)
             if CORNERS_ON and plans:
@@ -1252,7 +1303,13 @@ class _Planner:
         out = []
         for run in clip_polyline(xy, box):
             la, lo, _ = self.frame.enu_to_geodetic(run[:, 0], run[:, 1], 0.0)
-            out.append(np.stack([np.asarray(lo, np.float64), np.asarray(la, np.float64)], axis=1))
+            part = np.stack([np.asarray(lo, np.float64), np.asarray(la, np.float64)], axis=1)
+            # Retained endpoints keep their source connector coordinates, not a round-trip approximation.
+            if np.array_equal(run[0], xy[0]):
+                part[0] = ring[0]
+            if np.array_equal(run[-1], xy[-1]):
+                part[-1] = ring[-1]
+            out.append(part)
         return out
 
     def _obs(self, key, lonlat=None):
