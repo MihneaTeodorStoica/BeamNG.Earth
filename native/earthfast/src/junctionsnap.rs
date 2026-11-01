@@ -85,9 +85,10 @@ pub fn snap_junctions<'py>(
                 if d < distance { segment = i; t = u; distance = d; }
             }
         }
-        // A connector outside a clipped/ground piece is not a new endpoint. One metre only allows
-        // the plan's 4 m resampling chords to cut a corner of the original source line.
-        if distance > 1.0 || !distance.is_finite() { continue; }
+        // junction_nodes established membership on the original ground/clipped source piece.
+        // A valid corner can be far from this plan's resampling chord: projection samples the
+        // proven participant, it does not discover a join or choose another road.
+        if !distance.is_finite() { continue; }
         let arc = s[segment] + t * (s[segment + 1] - s[segment]);
         groups.entry(node).or_default().push(Node { plan: j, end, segment, t, arc, point });
     }

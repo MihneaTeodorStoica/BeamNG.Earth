@@ -148,6 +148,41 @@ class SourceConnectorTest(unittest.TestCase):
         nodes = grading.junction_nodes(FRAME, f, [("long", PRIMARY, retained)])[0]
         self.assertEqual([(name, end) for name, _xy, end in nodes], [("west", 0)])
 
+    def test_original_corner_connector_survives_resampling_chord(self):
+        # The original node is at station102: halfway between the plan's retained100/104m
+        # vertices. The 90-degree corner is sqrt(2)m from their chord, not a missing join.
+        f = features([[(-102, 0), (0, 0), (0, 98)], [(0, 0), (0, -200)]],
+                     ["primary", "service"], ids=["corner", "side"])
+        f.rules["connectors"] = rules([(0, "join", 0.51, 0.51), (1, "join", 0.0, 0.0)])
+        specs = [PRIMARY, SERVICE]
+        parts = [(f.parts(i)[0][0], specs[i]) for i in range(2)]
+        ps = grading.plan_roads(FRAME, parts, lambda la, lo: np.full(np.shape(la), 10.0), cuts=False)
+        ps[0].rid, ps[1].rid = 1, 2
+        ps[1].z = np.full(len(ps[1].z), 12.0)
+        source = [(str(f.ids[i]), specs[i], parts[i][0]) for i in range(2)]
+        nodes = grading.junction_nodes(FRAME, f, source)
+        self.assertEqual([len(row) for row in nodes], [1, 1])
+        point = np.asarray(nodes[0][0][1])
+        a, delta = ps[0].xy[:-1], np.diff(ps[0].xy, axis=0)
+        t = np.clip(((point - a) * delta).sum(axis=1) / (delta * delta).sum(axis=1), 0.0, 1.0)
+        self.assertGreater(np.linalg.norm(a + t[:, None] * delta - point, axis=1).min(), 1.0)
+        q = ps[1].xy[:4]
+        q = np.concatenate([q + [lateral, 0.0] for lateral in (-1.0, 0.0, 1.0)])
+        before = grading.grade_points(q[:, 0], q[:, 1], np.full(len(q), 12.0), ps)
+        grading.snap_junctions(ps, specs, nodes)
+        self.assertAlmostEqual(ps[1].z[0], 10.0, places=6)
+        self.assertEqual(ps[1].z[-1], 12.0)
+        after = grading.grade_points(q[:, 0], q[:, 1], np.full(len(q), 12.0), ps)
+        self.assertGreater(float(np.max(before - after)), 0.25)
+
+    def test_source_membership_is_not_just_the_clipped_piece_bounding_box(self):
+        f = features([[(-100, 0), (0, 0), (0, 100)]], ["primary"], ids=["bend"])
+        f.rules["connectors"] = rules([(0, "join", 0.5, 0.5)])
+        # An artificial piece across the original bend's box does not contain its connector.
+        ring = f.parts(0)[0][0]
+        cut = ring[[0, 2]]
+        self.assertEqual(grading.junction_nodes(FRAME, f, [("bend", PRIMARY, cut)]), [[]])
+
     def test_tunnel_and_bridge_ranges_do_not_supply_surface_connectors(self):
         for flag in ("is_bridge", "is_tunnel"):
             f = features([[(-100, 0), (100, 0)]], ["primary"], ids=["layers"],
