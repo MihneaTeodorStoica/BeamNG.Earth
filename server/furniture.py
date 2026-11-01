@@ -554,14 +554,13 @@ def _box_distance2(a, b, low, high):
 class RoadClearance:
     """Reusable segment index for complete, yawed furniture colliders against carriageways at every level.
 
-    lines: [(half width, points (k, 2 or 3))]; decks: [(points (k, 3), half width)]. Unknown heights (2D lines)
-    conservatively block at every level. The existing roadwidth.Walls bucket index supplies nearby segments,
-    including the interiors of long segments; there is no per-object scan of all roads, nor an own-road exemption.
-    bounds limits index construction to a tile's context, without clipping its placement/ownership decisions.
+    lines: [(half width, points (k, 2 or 3))]; decks: [(points (k, 3), half width)]. A half width is a scalar
+    or an array of k-1 segment widths. Unknown heights (2D lines) conservatively block at every level. The existing
+    roadwidth.Walls bucket index supplies nearby segments, including the interiors of long segments; there is no
+    per-object scan of all roads, nor an own-road exemption. bounds limits construction, not placement/ownership.
     """
 
     def __init__(self, lines, decks=(), bounds=None):
-        import roads
         import roadmesh
         import roadwidth
         aa, bb, widths, bottoms = [], [], [], []
@@ -572,18 +571,31 @@ class RoadClearance:
                 continue
             if p.shape[1] == 2:
                 p = np.column_stack([p, np.full(len(p), np.nan)])
-            pieces = [p]
+            a, b = p[:-1], p[1:]
+            hw = np.broadcast_to(np.asarray(half, np.float64), (len(a),))
             if bounds is not None:
-                reach = float(half) + 32.0  # owned props, or a junction support relocated up to 20 m outside the box
-                pieces = roads.clip_polyline(p, bounds[0] - reach, bounds[1] - reach,
-                                              bounds[2] + reach, bounds[3] + reach)
-            for piece in pieces:
-                if len(piece) < 2:
-                    continue
-                aa.extend(piece[:-1])
-                bb.extend(piece[1:])
-                widths.extend([float(half)] * (len(piece) - 1))
-                bottoms.extend([float(bottom)] * (len(piece) - 1))
+                # Clip segments, not the whole polyline: each segment keeps its own tapered width even where a
+                # tile boundary cuts it. A whole-feature maximum would erase clear props beside narrow sections.
+                # Include the next pole beyond an owned span's start, not just relocated junction supports.
+                reach = float(hw.max()) + max(POLE_SPACING, TOWN_POLE_SPACING) + 32.0
+                low, high = np.asarray(bounds[:2]) - reach, np.asarray(bounds[2:]) + reach
+                delta = b - a
+                enter, leave = np.zeros(len(a)), np.ones(len(a))
+                for axis in (0, 1):
+                    parallel = np.abs(delta[:, axis]) < 1e-12
+                    div = np.where(parallel, 1.0, delta[:, axis])
+                    t0, t1 = (low[axis] - a[:, axis]) / div, (high[axis] - a[:, axis]) / div
+                    enter = np.maximum(enter, np.where(parallel, -np.inf, np.minimum(t0, t1)))
+                    leave = np.minimum(leave, np.where(parallel, np.inf, np.maximum(t0, t1)))
+                    leave[parallel & ((a[:, axis] < low[axis]) | (a[:, axis] > high[axis]))] = -np.inf
+                keep = enter <= leave
+                b = a[keep] + leave[keep, None] * delta[keep]
+                a = a[keep] + enter[keep, None] * delta[keep]
+                hw = hw[keep]
+            aa.extend(a)
+            bb.extend(b)
+            widths.extend(hw)
+            bottoms.extend([float(bottom)] * len(a))
         self.a = np.asarray(aa, np.float64).reshape(-1, 3)
         self.b = np.asarray(bb, np.float64).reshape(-1, 3)
         self.half = np.asarray(widths, np.float64)
@@ -704,11 +716,10 @@ def under_decks(rows, decks, wires=None):
     for pts, half in decks:
         p = np.asarray(pts, np.float64)
         if len(p) >= 2:
-            segs.append((p[:-1], p[1:], half + DECK_SIDE_M))
+            segs.append((p[:-1], p[1:], np.asarray(half, np.float64) + DECK_SIDE_M))
 
-    def deck_z(x, y):
-        """The lowest deck surface over (x, y), or None."""
-        best = None
+    def deck_levels(x, y):
+        """Every overlapping deck surface over (x, y), not just the lowest of a stacked interchange."""
         for a, b, reach in segs:
             d = b[:, :2] - a[:, :2]
             L2 = np.maximum((d * d).sum(1), 1e-12)
@@ -716,13 +727,11 @@ def under_decks(rows, decks, wires=None):
             q = a[:, :2] + t[:, None] * d
             near = np.hypot(q[:, 0] - x, q[:, 1] - y) < reach
             if near.any():
-                z = float((a[:, 2] + t * (b[:, 2] - a[:, 2]))[near].min())
-                best = z if best is None else min(best, z)
-        return best
+                yield a[near, 2] + t[near] * (b[near, 2] - a[near, 2])
     out = []
     for r in rows:
-        z = deck_z(r[1], r[2])
-        if z is not None and r[3] < z and r[3] + r[6] > z - DECK_HEADROOM_M:
+        if any(((r[3] < z) & (r[3] + r[6] > z - DECK_HEADROOM_M)).any()
+               for z in deck_levels(r[1], r[2])):
             continue
         out.append(r)
     if wires is not None:
@@ -731,8 +740,8 @@ def under_decks(rows, decks, wires=None):
             w = np.asarray(w, np.float64)
             hit = False
             for x, y, wz in w[:, :3]:
-                z = deck_z(x, y)
-                if z is not None and z - DECK_WIRE_M < wz < z + DECK_HEADROOM_M:
+                if any(((z - DECK_WIRE_M < wz) & (wz < z + DECK_HEADROOM_M)).any()
+                       for z in deck_levels(x, y)):
                     hit = True
                     break
             if not hit:
@@ -773,13 +782,14 @@ def off_buildings(rows, rings, groups=(G_STREET_TREE,), clear=STREET_TREE_WALL_M
 
 
 def place(roads, walks, box, curb_h=0.15, wires=None, town=False, left_hand=False, decks=(),
-          signals=None, buried=0.0, region=None, lighting=None, ground=None):
+          signals=None, buried=0.0, region=None, lighting=None, ground=None, clearance=None):
     """Rows [group, x, y, z, yaw, scale, height, rank] (trees.lua's tile rows) of the lamps and poles of a
     tile box (x0, y0, x1, y1). roads: build_tile's (fid, spec, centreline (k, 3), lon); walks: its sidewalk
     runs (dicts with fid, pts, side, w); decks: the bridge decks over the tile [(centreline (k, 3), half
     width)]: nothing tall under them (under_decks). buried: the share of the country's low-voltage lines that are
     underground (buried_share): that share of the roads (hashed) get no utility poles (a town's street its lamps
-    instead). region: lamp_region's (the lamps' spacing)."""
+    instead). region: lamp_region's (the lamps' spacing). clearance: the tile's shared RoadClearance, including
+    sampled tapers and the generated decks' shifts / sidewalks; None builds one from these roads and decks."""
     spacing_of = lamp_spacing(region, dense=not town)
     lighting = lighting or {}  # OSM way lighting; absent/unknown keeps the inferred rule
     x0, y0, x1, y1 = box
@@ -787,7 +797,8 @@ def place(roads, walks, box, curb_h=0.15, wires=None, town=False, left_hand=Fals
 
     def overhead(fid):          # does this road's line run on poles (not buried)?
         return _h01(fid, "buried") >= buried
-    clearance = RoadClearance([(spec.width / 2, pts) for _, spec, pts, _ in roads], decks, bounds=box)
+    clearance = clearance if clearance is not None else RoadClearance(
+        [(spec.width / 2, pts) for _, spec, pts, _ in roads], decks, bounds=box)
     rows = []
     lit = set()
     for wk in walks:

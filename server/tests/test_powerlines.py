@@ -205,7 +205,8 @@ class OffRoadsTest(unittest.TestCase):
 class TowerFootprintTest(unittest.TestCase):
     """The native layout decides yaw; check its emitted rows against the tile's authoritative solved roads."""
 
-    def place(self, road_context=(), deck_context=()):
+    def place(self, lines=(), decks=(), clearance=None):
+        import furniture
         import mapgeom
         from test_roads import FRAME
         la, lo, _ = FRAME.enu_to_geodetic(np.array([100., 200.]), np.array([100., 100.]), 0.)
@@ -221,14 +222,14 @@ class TowerFootprintTest(unittest.TestCase):
                 return SimpleNamespace(layers={"infrastructure": infra} if "infrastructure" in layers else {"roads": None})
 
         props, wires = [], []
+        if clearance is None:
+            clearance = furniture.RoadClearance(lines, decks, bounds=(0., 0., 256., 256.))
         powerlines.tile_lines(FRAME, 0, 0, Md(), lambda la, lo: np.zeros(np.shape(la)), props, wires,
-                              road_context=road_context, deck_context=deck_context)
+                              clearance=clearance)
         return props, wires
 
     def test_service_road_rejects_collider_but_keeps_conductors(self):
-        import roads
-        service = ("service", roads.Spec(8., "paved", False, "service", False),
-                   np.array([[100., 0., 0.], [100., 256., 0.]]), 0.)
+        service = (4., np.array([[100., 0., 0.], [100., 256., 0.]]))
         before, old_wires = self.place()
         after, wires = self.place([service])
         self.assertEqual(len(before), 2)
@@ -241,20 +242,30 @@ class TowerFootprintTest(unittest.TestCase):
             self.assertEqual(ar, br)
 
     def test_uses_actual_mapped_width(self):
-        import roads
         # The pivot is outside the class-default 8 m road, but not a source-mapped 24 m carriageway.
-        spec = roads.Spec(24., "paved", True, "primary", False)
-        wide = ("wide", spec, np.array([[110., 0., 0.], [110., 256., 0.]]), 0.)
+        wide = (12., np.array([[110., 0., 0.], [110., 256., 0.]]))
         props, wires = self.place([wide])
         self.assertEqual(len(props), 1)
         self.assertGreater(props[0][1], 190.)
         self.assertTrue(wires)
 
     def test_real_clearance_below_a_high_bridge_is_preserved(self):
-        import roads
-        spec = roads.Spec(8., "paved", False, "primary", False)
         xy = np.array([[0., 100.], [256., 100.]])
-        high = ("deck", spec, xy, np.full(2, 50.), 0.)
-        low = ("deck", spec, xy, np.full(2, 20.), 0.)
-        self.assertEqual(len(self.place(deck_context=[high])[0]), 2)
-        self.assertEqual(self.place(deck_context=[low])[0], [])
+        high = (np.column_stack([xy, np.full(2, 50.)]), 4.)
+        low = (np.column_stack([xy, np.full(2, 20.)]), 4.)
+        self.assertEqual(len(self.place(decks=[high])[0]), 2)
+        self.assertEqual(self.place(decks=[low])[0], [])
+
+    def test_per_segment_taper_keeps_the_other_tower_and_every_conductor(self):
+        # A 10 m offset clears the stock tower beside the narrow segment, but not the widened continuation.
+        line = np.array([[0., 110., 0.], [150., 110., 0.], [256., 110., 0.]])
+        _, old_wires = self.place()
+        before, _ = self.place([(4., line)])
+        after, wires = self.place([(np.array([4., 12.]), line)])
+        self.assertEqual(len(before), 2)
+        self.assertEqual(len(after), 1)
+        self.assertLess(after[0][1], 110.)
+        self.assertEqual(len(wires), len(old_wires))
+        for (a, ar), (b, br) in zip(wires, old_wires):
+            np.testing.assert_array_equal(a, b)
+            self.assertEqual(ar, br)

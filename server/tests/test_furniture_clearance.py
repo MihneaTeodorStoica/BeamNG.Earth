@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import furniture  # noqa: E402
 import roads  # noqa: E402
 from test_furniture import road  # noqa: E402
-from test_roads import features  # noqa: E402
+from test_roads import FRAME, features, flat, rules  # noqa: E402
 
 
 def row(group, x, y, z=0.0, yaw=0.0, height=None):
@@ -184,6 +185,122 @@ class PlacementClearanceTest(unittest.TestCase):
         furniture.under_decks([], [deck], wires)
         self.assertEqual(len(wires), 1)
         np.testing.assert_array_equal(wires[0], high)
+
+
+class DevelopmentContextTest(unittest.TestCase):
+    def test_segment_widths_survive_tile_clipping_without_a_feature_maximum(self):
+        pts = np.array([[-1000., 0., 0.], [100., 0., 0.], [1000., 0., 0.]])
+        clear = furniture.RoadClearance([(np.array([4., 8.]), pts)], bounds=(0., -20., 256., 20.))
+        self.assertTrue(clear.clear(row('stop', 20., 5.)))
+        self.assertFalse(clear.clear(row('stop', 180., 5.)))
+        self.assertEqual(set(clear.half), {4., 8.})
+
+    def test_every_stacked_deck_is_checked_but_real_overhead_clearance_stays(self):
+        decks = [(np.array([[-100., 0., z], [100., 0., z]]), 5.5) for z in (8., 20.)]
+        between = row('stop', 0., 0., z=10.)
+        through_upper = row('stop', 0., 0., z=18.)
+        upper_wire = np.array([[-20., 0., 20.], [20., 0., 20.]])
+        high_wire = upper_wire + [0., 0., 10.]
+        between_wire = upper_wire - [0., 0., 10.]
+        wires = [upper_wire, high_wire, between_wire]
+        self.assertEqual(furniture.under_decks([between, through_upper], decks, wires), [between])
+        self.assertEqual(len(wires), 2)
+        np.testing.assert_array_equal(wires[0], high_wire)
+        np.testing.assert_array_equal(wires[1], between_wire)
+
+    def test_owned_span_checks_its_next_support_beyond_the_tile_edge(self):
+        fid = 'seam-support'
+        phase = furniture._h01(fid, 'pphase') * furniture.POLE_SPACING
+        start = 250. - phase - 5 * furniture.POLE_SPACING
+        base = (fid, roads.Spec(8., 'paved', False, 'tertiary', False),
+                np.array([[start, 100., 0.], [600., 100., 0.]]), 0.)
+        crossing = ('next-support', roads.Spec(8., 'paved', False, 'service', False),
+                    np.array([[295., -100., 0.], [295., 300., 0.]]), 0.)
+        rs = [base, crossing]
+        whole_wires, left_wires, right_wires = [], [], []
+        whole = furniture.place(rs, [], (0., 0., 512., 256.), wires=whole_wires)
+        split = (furniture.place(rs, [], (0., 0., 256., 256.), wires=left_wires)
+                 + furniture.place(rs, [], (256., 0., 512., 256.), wires=right_wires))
+        self.assertEqual(sorted(whole), sorted(split))
+        self.assertTrue(whole_wires)
+        self.assertEqual(sorted(tuple(w.ravel()) for w in whole_wires),
+                         sorted(tuple(w.ravel()) for w in left_wires + right_wires))
+
+    def test_build_tile_uses_narrowed_taper_instead_of_nominal_width(self):
+        f = features([[(0., 50.), (64., 50.), (96., 50.), (112., 50.), (128., 50.)],
+                      [(128., 50.), (256., 50.)]], ['primary', 'primary'])
+        f.attrs['osm_width'] = np.array([12., 4.])
+        context, rs = [], []
+        roads.build_tile(FRAME, 0, 0, [f], lambda la, lo: np.zeros(np.shape(la)),
+                         clearance_out=context, roads_out=rs)
+        self.assertEqual(rs[0][1].width, 12., 'placement Specs and generated road geometry are not rewritten')
+        self.assertTrue(context[0].clear(row('stop', 120., 55.)))
+        self.assertFalse(furniture.RoadClearance([(6., rs[0][2])]).clear(row('stop', 120., 55.)))
+
+    def test_narrowed_sidewalk_lamps_do_not_readd_the_nominal_carriageway(self):
+        base, walks, box, _, _ = PlacementClearanceTest().fixture()
+        fid, spec, pts, lon = base
+        nominal = (fid, spec._replace(width=12.), pts, lon)
+        actual = furniture.RoadClearance([(4., pts)], bounds=box)
+        rows = furniture.place([nominal], walks, box, clearance=actual)
+        self.assertTrue(any(r[0] == furniture.G_LAMP for r in rows))
+        self.assertTrue(all(actual.clear(r) for r in rows if r[0] == furniture.G_LAMP))
+        self.assertFalse(any(r[0] == furniture.G_LAMP for r in furniture.place([nominal], walks, box)))
+
+    def test_actual_shifted_sidewalk_deck_and_its_taper_feed_the_shared_index(self):
+        spec = roads.Spec(8., 'paved', True, 'primary', False)
+        pts = np.array([[0., 100., 20.], [128., 100., 20.], [256., 100., 20.]])
+        chunks = roads._deck_chunks(
+            [('deck', spec, pts, 0.)], (0., 0., 256., 256.), walks={'deck': (2., (1,))},
+            shift_of=lambda fid, p: np.full(len(p), 10.),
+            width_of=lambda fid, p: np.where(p[:, 0] < 128., 8., 16.))
+        context = []
+        with patch.object(roads, '_bridge_chunks', return_value=chunks):
+            roads.build_tile(FRAME, 0, 0, [], flat, clearance_out=context)
+        self.assertTrue(context[0].clear(row('stop', 20., 119., z=20.)))
+        self.assertFalse(context[0].clear(row('stop', 190., 119., z=20.)))
+        self.assertTrue(furniture.RoadClearance([], [(pts, 4.)]).clear(row('stop', 190., 119., z=20.)))
+
+    def test_tunnel_vault_is_not_a_second_traffic_deck(self):
+        import roadmesh
+        tunnel = {'tunnel': True, 'n': [[0., 100., 0.], [256., 100., 0.]], 'w': 8.}
+        context = []
+        with patch.object(roads, '_tunnel_chunks', return_value=[tunnel]), \
+                patch.object(furniture, 'place', wraps=furniture.place) as place:
+            roads.build_tile(FRAME, 0, 0, [], flat, tunnels=object(), walks=[], props=[],
+                             clearance_out=context)
+        self.assertIs(place.call_args.kwargs['clearance'], context[0])
+        self.assertEqual(place.call_args.kwargs['decks'], [])
+        self.assertTrue(context[0].clear(row('stop', 100., 100., z=roadmesh.TUNNEL_H + 1.)))
+
+    def test_high_bridge_preserves_static_and_switchable_signal_level_parity(self):
+        import navgraph
+        f = features([[(0., 0.), (0., -100.)], [(0., 0.), (100., 0.)], [(0., 0.), (-100., 0.)],
+                      [(-100., 0.), (100., 0.)]], ['primary'] * 4, flags=[(3, 'is_bridge')])
+        f.attrs['osm_width'] = np.array([8., 8., 8., 80.])
+        f.rules['connectors'] = rules([(i, 'J', 0., 0.) for i in range(3)])
+        urban = lambda la, lo: np.ones(np.shape(la), bool)
+        specs = roads.road_specs(f, urban)
+        rs = []
+        for i in range(3):
+            ll = np.asarray(f.parts(i)[0][0], np.float64)
+            x, y, _ = FRAME.geodetic_to_enu(ll[:, 1], ll[:, 0], 0.)
+            z = FRAME.geodetic_to_enu(ll[:, 1], ll[:, 0], flat(ll[:, 1], ll[:, 0]))[2]
+            rs.append((str(f.ids[i]), specs[i], np.column_stack([x, y, z]), float(ll[:, 0].mean())))
+        ll = np.asarray(f.parts(3)[0][0], np.float64)
+        x, y, _ = FRAME.geodetic_to_enu(ll[:, 1], ll[:, 0], 0.)
+        xy, z = np.column_stack([x, y]), np.full(len(x), 50.)
+        decks = {str(f.ids[3]): [(xy, z)]}
+        signals = np.zeros((1, 2))
+        static = furniture.junction_props(rs, (-50., -50., 50., 50.), signals=signals,
+                                         decks=[(np.column_stack([xy, z]), 40.)],
+                                         ground=lambda x, y: np.full(np.shape(x), 10.))
+        graph = navgraph.build(FRAME, [f], flat, (0., 0.), urban_fn=urban, decks=decks, signals=signals)
+        heads = [a[7:11] for junction in graph['signals'] for a in junction['app']]
+        self.assertTrue(static)
+        self.assertEqual(len(heads), len(static))
+        self.assertTrue(all(h[0] is not None for h in heads), 'no static-only uncontrolled lights below a high deck')
+        self.assertEqual(sorted(tuple(h) for h in heads), sorted(tuple(r[1:5]) for r in static))
 
 
 if __name__ == '__main__':

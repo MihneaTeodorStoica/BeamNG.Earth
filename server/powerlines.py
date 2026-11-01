@@ -184,13 +184,13 @@ def _off_roads(frame, md, e, n, ll):
     return e, n
 
 
-def tile_lines(frame, tx, ty, md, elev, props, wires, road_context=(), deck_context=()):
+def tile_lines(frame, tx, ty, md, elev, props, wires, clearance=None):
     """Add road tile (tx, ty)'s towers, gantries, substation yards (props rows, furniture.place's form) and conductors
-    (wires polylines) of the power lines near it; elev(lat, lon): the ground. road_context is the tile builder's
-    (fid, Spec, points (k, 3), lon) ground roads, including mapped/measured widths; deck_context is its solved bridge
-    parts (fid, Spec, xy, z, lon). Full stock colliders are checked AFTER native layout (which decides tower yaw).
-    Unlike moving a point away from one road, this also covers crossroads, a rotated tower's corners and services.
-    A tower with no safe footprint is omitted; its overhead conductors remain, not cut at a tile boundary."""
+    (wires polylines) of the power lines near it; elev(lat, lon): the ground. clearance is build_tile's shared
+    RoadClearance: sampled tapers and actual shifted / sidewalk-expanded decks, never tunnel vaults. Full stock
+    colliders are checked AFTER native layout (which decides tower yaw). Unlike moving a point away from one road,
+    this also covers crossroads, a rotated tower's corners and services. A tower with no safe footprint is omitted;
+    its overhead conductors remain, not cut at a tile boundary."""
     import roads
     from polygon import Path
     if md is None:
@@ -234,15 +234,10 @@ def tile_lines(frame, tx, ty, md, elev, props, wires, road_context=(), deck_cont
             stop |= here
         towers, ends, wp, wo = fast._ef.power_line_layout(pts, off, stop, ARMS, SAG, SEG_M, MIN_SPAN_M, MAX_SPAN_M,
                                                           DEDUPE_M, END_MERGE_M, GANTRY_FRONT, [x0, y0, x1, y1])
-        import furniture
-        clearance = furniture.RoadClearance([(spec.width / 2, p) for _fid, spec, p, _lon in road_context],
-                                            [(np.column_stack([xy, z]), spec.width / 2)
-                                             for _fid, spec, xy, z, _lon in deck_context],
-                                            bounds=(x0, y0, x1, y1))
         for x, y, zz, yaw in towers:
             row = [G_PYLON, round(float(x), 2), round(float(y), 2), round(float(zz), 2), round(float(yaw), 1),
                    1.0, PYLON_H, 0.0]
-            if clearance.clear(row):
+            if clearance is None or clearance.clear(row):
                 props.append(row)
         for a, b in zip(wo[:-1], wo[1:]):
             wires.append((np.asarray(wp[a:b]), WIRE_R))
