@@ -68,7 +68,7 @@ class TramBridgeTest(unittest.TestCase):
         self.assertEqual(railways.crossing_props(FRAME, 0, 0, [f], lambda xy: np.full(len(xy), 10.0)), [])
         grader = SimpleNamespace(frame=FRAME, widths=None,
                                  md=SimpleNamespace(cell=lambda *args, **kw: SimpleNamespace(layers={"roads": f})))
-        geometry = grading.Grader._cell_enu_calc(grader, None, True)
+        geometry = grading._Planner._cell_enu_calc(grader, None, True)
         self.assertEqual(len(geometry["rail_bridges"]), 1)
         self.assertEqual(geometry["rail_ground"], [], "neither ground tram nor metro becomes a road obstruction")
         np.testing.assert_allclose(geometry["rail_bridges"][0][[0, -1]], parts[0][3][[0, -1]], atol=1e-6)
