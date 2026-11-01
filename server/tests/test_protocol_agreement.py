@@ -471,10 +471,13 @@ class SessionsAgreementTest(test_server.ServerHarness):
     def test_mod_side(self):
         core = (LUA / "core.lua").read_text(encoding="utf-8")
         far = (LUA / "farfield.lua").read_text(encoding="utf-8")
+        roads_lua = (LUA / "roads.lua").read_text(encoding="utf-8")
         for kind in ("hello", "pose"):
             t = next(lua_tables(core, m.end() - 1) for m in re.finditer(r"net\.send\(\{", core)
                      if f"type = '{kind}'" in lua_tables(core, m.end() - 1))
-            self.assertIn("sessions = farfield.heldSessions()", t, kind)
+            self.assertIn("sessions = roads.allHeldSessions()", t, kind)
+        # (the far field's folders and the road tiles' kept across a server restart: their buildings, 2026-10-31)
+        self.assertIn("require('beamngEarth/farfield').heldSessions(), M.heldSessions()", roads_lua)
         self.assertIn("'^/temp/beamngEarth/([^/]+)/'", far)
         self.assertEqual(self.server.vfs_dir, f"/temp/beamngEarth/{self.server.sid}")
         self.assertEqual(modsim.folder_of(self.server.vfs_dir + "/far_1_0_0_0.cdae"), self.server.sid)
