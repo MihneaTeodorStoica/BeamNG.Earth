@@ -80,6 +80,26 @@ class CurveProfile(unittest.TestCase):
         self.assertTrue(np.all(zs[0][1:-1] >= g[1:-1] + roads.DECK_CLEAR - 1e-9))
         self.assertTrue(np.all(zs[0] >= g - 1e-9))
 
+    def test_easing_keeps_a_terrain_peak_between_working_grid_points(self):
+        # A mapped vertex can lie between both points of the end-inclusive metre grid.
+        # The ground sampled at that vertex must not disappear during the round trip.
+        x = np.r_[np.arange(0.0, 201.0, 4.0), 200.5]
+        line_ = np.c_[x, np.zeros_like(x)]
+        for peak in (0.1, 0.009):
+            for reverse in (False, True):
+                with self.subTest(peak=peak, reverse=reverse):
+                    xy = line_[::-1] if reverse else line_
+                    ground = lambda q: np.where(np.abs(q[:, 0] - 180.0) < 1e-9,
+                                                peak - roads.DECK_CLEAR, -1.05)
+                    z, = roads._ease([xy], [np.zeros(len(xy))], ground)
+                    at = int(np.flatnonzero(xy[:, 0] == 180.0)[0])
+                    self.assertGreaterEqual(z[at], peak - 1e-9)
+                    self.assertTrue(np.all(z[1:-1] >= ground(xy)[1:-1] - 1e-9))
+                    np.testing.assert_allclose(z[[0, -1]], 0.0, atol=1e-9)
+                    if peak > 0.01:
+                        self.assertGreater(z[at - 1], 0.0, "the lift is eased before the peak")
+                        self.assertGreater(z[at + 1], 0.0, "the lift is eased after the peak")
+
     def test_water_span_clearance(self):
         ln = line(0, 1000, 4.0)
 

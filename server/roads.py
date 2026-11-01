@@ -3462,21 +3462,36 @@ def _lift_smooth(s, z, floor, iters=8):
     # Uniform and end-inclusive: tiny rotation/length roundoff must not add an almost-zero final interval.
     g = np.linspace(0.0, s[-1], max(1, int(math.ceil(s[-1] - 1e-9))) + 1)
     zg = np.interp(g, s, z)
-    # within LIFT_EASE_M / 2 of an abutment the floor is no higher than the abutment allows at LIFT_END_GRADE (a bank
-    # the DEM shows over the road's end: the deck lands on the road, not on the bank's top)
-    d0, d1 = g, g[-1] - g
-    cap = np.minimum(np.where(d0 < LIFT_EASE_M / 2 - 1e-8, z[0] + LIFT_END_GRADE * d0, np.inf),
-                     np.where(d1 < LIFT_EASE_M / 2 - 1e-8, z[-1] + LIFT_END_GRADE * d1, np.inf))
-    fl = np.interp(g, s, floor)
-    fg = np.maximum(np.minimum(fl, cap), fl - DECK_CLEAR)     # (never under the ground itself)
+    # Within LIFT_EASE_M / 2 of an abutment, limit the lift to the landing grade,
+    # but never put the deck under the ground itself.
+    def bounded_floor(at, levels):
+        d0, d1 = at, s[-1] - at
+        cap = np.minimum(np.where(d0 < LIFT_EASE_M / 2 - 1e-8, z[0] + LIFT_END_GRADE * d0, np.inf),
+                         np.where(d1 < LIFT_EASE_M / 2 - 1e-8, z[-1] + LIFT_END_GRADE * d1, np.inf))
+        return np.maximum(np.minimum(levels, cap), levels - DECK_CLEAR)
+    fg = bounded_floor(g, np.interp(g, s, floor))
+    fs = bounded_floor(s, floor)
     r = int(LIFT_EASE_M // 2)
     inner = np.ones(len(g), bool)
     inner[0] = inner[-1] = False
-    if not (fg[inner] > zg[inner] + 0.01).any():
+    if not (fg[inner] > zg[inner] + 0.01).any() and not (fs[1:-1] > z[1:-1] + 0.01).any():
         out = np.array(z)
-        out[1:-1] = np.maximum(out[1:-1], np.interp(s, g, fg)[1:-1])
+        out[1:-1] = np.maximum(out[1:-1], np.maximum(fs, np.interp(s, g, fg))[1:-1])
         return out
+    # The metre grid can straddle a terrain peak sampled at a mapped vertex.
+    # Feed each original requirement into both bracketing grid points before
+    # smoothing, rather than losing it in the interpolation to and from g.
+    source = s[1:-1]
+    hi = np.minimum(np.searchsorted(g, source), len(g) - 1)
+    left = np.maximum(hi - 1, 0)
+    at_left = np.abs(g[left] - source) < 1e-9
+    at_right = np.abs(g[hi] - source) < 1e-9
+    lo = np.where(at_right, hi, left)
+    hi = np.where(at_left, left, hi)
     want = np.maximum(fg - zg, 0.0)
+    source_want = np.maximum(fs[1:-1] - np.interp(source, g, zg), 0.0)
+    np.maximum.at(want, lo, source_want)
+    np.maximum.at(want, hi, source_want)
     zz = zg
     for _ in range(iters):
         cone = _tents(g, np.where(inner, want, -np.inf), LIFT_GRADE)
@@ -3485,13 +3500,17 @@ def _lift_smooth(s, z, floor, iters=8):
         zz = zg + np.convolve(ext, np.ones(2 * r + 1) / (2 * r + 1), mode="valid")
         zz[0], zz[-1] = zg[0], zg[-1]
         short = np.where(inner, fg - zz, 0.0)
-        if short.max() <= 0.01:
+        source_short = np.maximum(fs[1:-1] - np.interp(source, g, zz), 0.0)
+        if max(short.max(), source_short.max()) <= 0.01:
             break
-        want = want + np.maximum(short, 0.0)
+        increase = np.maximum(short, 0.0)
+        np.maximum.at(increase, lo, source_short)
+        np.maximum.at(increase, hi, source_short)
+        want += increase
     zg = zz
     out = np.interp(s, g, zg)
     out[0], out[-1] = z[0], z[-1]
-    ff = np.interp(s, g, fg)
+    ff = np.maximum(fs, np.interp(s, g, fg))
     out[1:-1] = np.maximum(out[1:-1], ff[1:-1])
     return out
 
