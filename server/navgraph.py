@@ -379,7 +379,7 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                 signal_decks.append((np.asarray(ch["n"], np.float64), half))
 
     def signal_ground(x, y):
-        la, lo, _ = frame.enu_to_geodetic(x, y, 0.0)
+        la, lo, _ = frame.enu_to_geodetic(np.asarray([x]), np.asarray([y]), 0.0)
         return frame.geodetic_to_enu(la, lo, np.asarray(elev(la, lo), np.float64))[2]
 
     import islands
