@@ -155,6 +155,15 @@ class PinnedGeometry(unittest.TestCase):
         ground = lambda xy: 10.0 + 0.05 * np.maximum(-xy[:, 1], 0.0)
         return [a, b, c], ground, [(1, 200.0, 10.0)]
 
+    def test_ground_lift_preserves_a_legitimate_five_percent_deck(self):
+        lines, ground, _ = self.fixture()
+        xy = lines[2]
+        z = roads.deck_curve([xy], ground)[0]
+        np.testing.assert_allclose(z[[0, -1]], ground(xy[[0, -1]]), atol=1e-8)
+        self.assertTrue(np.all(z >= ground(xy) - 1e-8))
+        self.assertLess(float(np.max(z - ground(xy))), 0.3)
+        self.assertLessEqual(roads._curve_grade([xy], [z]), roads.DECK_MAX_GRADE + 0.01)
+
     def test_nearby_unconnected_deck_cannot_steal_ground_pin(self):
         lines, ground, crossings = self.fixture()
         zs = roads.deck_profile(lines, ground, crossings, pins=[(0.0, 0.0)])
