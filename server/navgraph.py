@@ -407,6 +407,10 @@ def _signals(arms, approaches, nodes, left_hand=False, ring=None, lines=(), sign
     farms = {name: [(x[0], x[1], x[2], x[3], x[4] == 0, x[5] if len(x) > 5 else math.inf) for x in a]
              for name, a in arms.items()}
     link_ok = furniture._link_check(farms, signals)
+    # Restrict index construction to this graph's nodes (some source ways extend many kilometres beyond it).
+    xy = np.asarray([v[:2] for v in nodes.values()], np.float64).reshape(-1, 2)
+    bounds = (*xy.min(0), *xy.max(0)) if len(xy) else (0.0, 0.0, 0.0, 0.0)
+    clearance = furniture.RoadClearance(lines, bounds=bounds)
     for name, a in arms.items():
         if name not in nodes or len(a) < 3 or not furniture._controlled_here(farms[name], signals):
             continue
@@ -435,7 +439,8 @@ def _signals(arms, approaches, nodes, left_hand=False, ring=None, lines=(), sign
             phase = 0 if abs(float(u @ axis)) > 0.7 else 1
             # the head's prop where furniture.junction_props stands it (the switchable stock boom replaces it); none
             # where no spot is clear of the carriageways (no prop there either)
-            pp = furniture.signal_spot(np.array([jx, jy]), u, right, wide, spec.width / 2, lines)
+            pp = furniture.signal_spot(np.array([jx, jy]), u, right, wide, spec.width / 2, lines,
+                                       group=kind, base_z=jz + 0.15, clearance=clearance)
             head = [None] * 4 if pp is None else [round(float(pp[0]), 2), round(float(pp[1]), 2), round(jz + 0.15, 2),
                                                   round(furniture._yaw(right[0], right[1]), 1)]
             app.append([nb, round(float(q[0]), 2), round(float(q[1]), 2), round(jz, 2),
