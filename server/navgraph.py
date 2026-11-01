@@ -327,6 +327,9 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
             else:
                 lo, li = _lanes(w, direction != 0, spec.lanes)
             profile = _speed_profile(xy, w, direction != 0, urban=bool(getattr(spec, "urban", True)))
+            # (a pass road's widened hairpins: its half width there, roads.hairpin_extra on its whole line)
+            hx = roads.hairpin_extra(frame, spec, np.asarray(p, np.float64)[:, :2])
+            hxm = np.zeros(len(full)) if hx is None else np.interp(full, s, hx)
             # this road's approaches at its two ends (the graph node next to the junction, whether traffic comes in)
             for end in (0, -1):
                 j, nb = (0, 1) if end == 0 else (len(names) - 1, len(names) - 2)
@@ -357,7 +360,8 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                 legal = road_mph(feats, i, spec, mph, at=(full[j] + full[j + 1]) / (2 * L)) * MPH
                 target = min(legal, float(profile[j]), float(profile[j + 1]))
                 edges.append([a, b, 1 if direction else 0, lo, li, round(target, 2), driv,
-                              round(w / 2 - (MOUNTAIN_EDGE_M if getattr(spec, "mountain", False) else 0.0), 2)])
+                              round(w / 2 - (MOUNTAIN_EDGE_M if getattr(spec, "mountain", False) else 0.0)
+                                    + float(max(hxm[j], hxm[j + 1])), 2)])
                 edge_fids.append(fid)
     # The static props use 3D solved roads/decks. A 2D graph clearance line would falsely block every level below
     # a viaduct, suppressing the switchable head while leaving the static signal behind.

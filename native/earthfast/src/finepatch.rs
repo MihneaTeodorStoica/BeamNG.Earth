@@ -176,6 +176,17 @@ pub fn fine_mesh<'py>(py: Python<'py>, x0: f64, y0: f64, square: f64, k: i64, ce
                     (aa, bb) if aa == k && bb == k => u11,
                     _ => h,
                 };
+                if is_rim {
+                    // (a rim cell lies over the terrain's own (pale) square by lift all over, but on a side it shares
+                    // with a fine cell, which meets it there at the terrain's edge: at 1 m steps a lifted middle alone
+                    // left most of the cell level with the terrain and the pale square showed through, 2026-11-01)
+                    let on_fine = (a == 0 && fine(j - 1, i)) || (a == k && fine(j + 1, i))
+                        || (b == 0 && fine(j, i - 1)) || (b == k && fine(j, i + 1));
+                    let inside = a > 0 && a < k && b > 0 && b < k;
+                    if !on_fine && !inside {
+                        h += lift;
+                    }
+                }
                 pos.push(x0 + (i as f64 + tx) * square);
                 pos.push(y0 + (j as f64 + ty) * square);
                 pos.push(h);

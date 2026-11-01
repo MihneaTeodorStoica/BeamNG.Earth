@@ -400,24 +400,18 @@ local function fineMaterial(name, layer, base)
   fineTexture(m, base)
   if fresh then
     for _, f in ipairs(satmat.FIELDS) do m:setField(f[1], 0, f[2]) end
+    -- (the colour: satmat's neutral ground grain, mean 0.5 grey; the layers' own detail textures are lighter than
+    -- that and made the pieces pale grey blocks on the asphalt, 2026-11-01. Their relief: the layer's normal detail)
+    m:setField('detailMap', 0, satmat.DETAIL_MAP)
+    for _, f in ipairs(satmat.DETAIL_FIELDS) do m:setField(f[1], 0, f[2]) end
     local tm = type(layer) == 'string' and scenetree.findObject(layer) or nil
-    local dtex = tm and tm:getField('baseColorDetailTex', 0) or ''
-    if dtex ~= '' then
-      local size = tonumber(tm:getField('baseColorDetailTexSize', 0)) or 1
-      local sc = string.format('%.4f %.4f', 1 / math.max(size, 0.25), 1 / math.max(size, 0.25))
-      m:setField('detailMap', 0, dtex)
-      m:setField('detailMapUseUV', 0, '1')
-      m:setField('detailScale', 0, sc)
-      m:setField('detailBaseColorMapStrength', 0, '0.35')
-      local ntex = tm:getField('normalDetailTex', 0) or ''
-      if ntex ~= '' then
-        m:setField('detailNormalMap', 0, ntex)
-        m:setField('normalDetailMapUseUV', 0, '1')
-        m:setField('detailNormalMapStrength', 0, '0.6')
-      end
-    else
-      m:setField('detailMap', 0, satmat.DETAIL_MAP)
-      for _, f in ipairs(satmat.DETAIL_FIELDS) do m:setField(f[1], 0, f[2]) end
+    local ntex = tm and tm:getField('normalDetailTex', 0) or ''
+    if ntex ~= '' then
+      local size = tonumber(tm:getField('normalDetailTexSize', 0)) or 1
+      m:setField('detailNormalMap', 0, ntex)
+      m:setField('normalDetailMapUseUV', 0, '1')
+      m:setField('detailNormalMapStrength', 0, '0.6')
+      m:setField('detailScale', 0, string.format('%.4f %.4f', 1 / math.max(size, 0.25), 1 / math.max(size, 0.25)))
     end
     m.canSave = false
     m:registerObject(name)
